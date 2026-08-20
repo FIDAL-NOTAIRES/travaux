@@ -38,6 +38,13 @@
   .champ input{border:1.5px solid #cfd6de;border-radius:6px;padding:9px 10px;font-size:15px;font-family:inherit;outline:none}
   .champ input:focus{border-color:var(--canard)}
   #commune{width:320px} .sec{width:110px} .num{width:120px}
+  .champcommune{position:relative}
+  .suggestions{position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid var(--canard);border-top:none;border-radius:0 0 8px 8px;box-shadow:0 6px 14px rgba(15,34,56,.15);z-index:1200;max-height:240px;overflow-y:auto;display:none}
+  .suggestions div{padding:9px 12px;cursor:pointer;font-size:14px;border-top:1px solid #eef1f4}
+  .suggestions div:first-child{border-top:none}
+  .suggestions div:hover,.suggestions div.focus{background:#eaf3f4}
+  .suggestions .cp{color:var(--bleugris);font-size:12px}
+  .suggestions .insee{float:right;color:var(--canard);font-size:12px;font-weight:600}
   .ok{color:var(--amande);font-weight:700;font-size:13px}
   .ko{color:var(--carmin);font-weight:700;font-size:13px}
   #communeInfo{font-size:13px;min-height:18px;margin-top:2px}
@@ -125,9 +132,10 @@
   <section class="saisie">
     <div class="titrecarte"><span class="badge">1</span><b>Références cadastrales</b></div>
     <div class="ligne">
-      <div class="champ" style="flex:1;min-width:280px">
+      <div class="champ champcommune" style="flex:1;min-width:280px">
         <label>Commune ou code postal</label>
         <input id="commune" placeholder="ex. Châtillon-sur-Chalaronne ou 01400" autocomplete="off">
+        <div class="suggestions" id="suggestions"></div>
         <div id="communeInfo"></div>
       </div>
     </div>
@@ -328,27 +336,53 @@ const EMPRISES = (() => {
 let inseeChoisi = null, nomCommune = '';
 const $ = id => document.getElementById(id);
 
-let minuteur = null;
+/* Autocomplétion de commune — suggestions au fil de la frappe (convention des autres applis) */
+let minuteur = null, suggestionsCourantes = [];
+
+function choisirCommune(c){
+  inseeChoisi = c.code; nomCommune = c.nom;
+  $('commune').value = c.nom;
+  fermerSuggestions();
+  $('communeInfo').innerHTML = '<span class="ok">✓ ' + c.nom + '</span> — INSEE ' + c.code +
+    (c.codesPostaux && c.codesPostaux.length ? ' · ' + c.codesPostaux[0] : '');
+  majBouton();
+}
+function fermerSuggestions(){ $('suggestions').style.display = 'none'; $('suggestions').innerHTML = ''; suggestionsCourantes = []; }
+function afficherSuggestions(cs){
+  suggestionsCourantes = cs;
+  $('suggestions').innerHTML = cs.map((c, i) =>
+    '<div data-i="' + i + '"><span class="insee">' + c.code + '</span>' + c.nom.replace(/[&<>"]/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[x])) +
+    (c.codesPostaux && c.codesPostaux.length ? ' <span class="cp">(' + c.codesPostaux.slice(0,2).join(', ') + (c.codesPostaux.length > 2 ? '…' : '') + ')</span>' : '') + '</div>'
+  ).join('');
+  $('suggestions').style.display = 'block';
+  $('suggestions').querySelectorAll('div[data-i]').forEach(d => {
+    d.onmousedown = e => { e.preventDefault(); choisirCommune(suggestionsCourantes[+d.dataset.i]); };
+  });
+}
+
 $('commune').addEventListener('input', () => {
   clearTimeout(minuteur); inseeChoisi = null; majBouton();
+  $('communeInfo').textContent = '';
   const q = $('commune').value.trim();
-  if (q.length < 2) { $('communeInfo').textContent = ''; return; }
+  if (q.length < 2) { fermerSuggestions(); return; }
   minuteur = setTimeout(async () => {
     try {
       const parCP = /^\d{5}$/.test(q);
       const url = 'https://geo.api.gouv.fr/communes?' +
-        (parCP ? 'codePostal=' + q : 'nom=' + encodeURIComponent(q)) +
-        '&fields=code,nom,codesPostaux&limit=5';
+        (parCP ? 'codePostal=' + q : 'nom=' + encodeURIComponent(q) + '&boost=population') +
+        '&fields=code,nom,codesPostaux&limit=8';
       const cs = await (await fetch(url)).json();
-      if (!cs.length) { $('communeInfo').innerHTML = '<span class="ko">✗ commune inconnue</span>'; return; }
-      const c = cs[0];
-      inseeChoisi = c.code; nomCommune = c.nom;
-      $('communeInfo').innerHTML = '<span class="ok">✓ ' + c.nom + '</span> — INSEE ' + c.code +
-        (cs.length > 1 ? ' <span style="color:var(--bleugris)">(' + (cs.length-1) + ' autre(s) : préciser si besoin)</span>' : '');
-      majBouton();
-    } catch { $('communeInfo').innerHTML = '<span class="ko">✗ service commune indisponible</span>'; }
-  }, 350);
+      if (!cs.length) { fermerSuggestions(); $('communeInfo').innerHTML = '<span class="ko">✗ commune inconnue</span>'; return; }
+      if (cs.length === 1) { choisirCommune(cs[0]); return; }
+      afficherSuggestions(cs);
+    } catch { fermerSuggestions(); $('communeInfo').innerHTML = '<span class="ko">✗ service commune indisponible</span>'; }
+  }, 300);
 });
+$('commune').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && suggestionsCourantes.length) { e.preventDefault(); choisirCommune(suggestionsCourantes[0]); }
+  if (e.key === 'Escape') fermerSuggestions();
+});
+$('commune').addEventListener('blur', () => setTimeout(fermerSuggestions, 200));
 
 function rangParcelle(){
   const div = document.createElement('div');
