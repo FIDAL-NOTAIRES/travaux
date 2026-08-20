@@ -552,11 +552,49 @@ async function textePdf(fichier){
    - jeton 1-4 chiffres → numéro de parcelle
    - le reste → nom de commune
    Ligne sans commune → hérite de la précédente. */
-function importerTexte(texte){
+/* Devine la commune d'un document collé ou glissé, par essais successifs :
+   1. codes DEP + COM (en-tête modèle 1)  2. INSEE ou code postal isolé en tête
+   3. nom en clair (« COM 093 NOM », « commune de NOM ») validé contre geo.api.gouv.fr */
+async function devinerCommune(texte){
+  const tete = texte.slice(0, 1200);
+  const norm = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const geo = async p => { try { const r = await (await fetch('https://geo.api.gouv.fr/communes?' + p + '&fields=code,nom&limit=2')).json(); return Array.isArray(r) ? r : []; } catch { return []; } };
+  const mDep = tete.match(/DEP\D{0,12}?(\d{2})\b/i);
+  const mCom = tete.match(/\bCOM(?:MUNE)?\D{0,12}?(\d{3})\b/i);
+  if (mDep && mCom) {
+    const cs = await geo('code=' + mDep[1] + mCom[1]);
+    if (cs.length) return cs[0];
+  }
+  const m5 = tete.match(/\b(\d{5})\b/);
+  if (m5) {
+    let cs = await geo('code=' + m5[1]);          // INSEE
+    if (cs.length) return cs[0];
+    cs = await geo('codePostal=' + m5[1]);        // code postal, seulement s'il est sans ambiguïté
+    if (cs.length === 1) return cs[0];
+  }
+  const cands = [];
+  let m = tete.match(/COM(?:MUNE)?\D{0,12}\d{3}\s+([A-ZÀ-Ý][A-ZÀ-Ý' -]{2,40})/);
+  if (m) cands.push(m[1]);
+  m = tete.match(/commune\s+(?:de\s+|d['’]\s*)?([A-Za-zÀ-ÿ' -]{3,40})/i);
+  if (m) cands.push(m[1]);
+  for (let cand of cands) {
+    cand = cand.trim().replace(/\s{2,}/g, ' ');
+    const cs = await geo('nom=' + encodeURIComponent(cand) + '&boost=population' + (mDep ? '&codeDepartement=' + mDep[1] : ''));
+    for (const c of cs)
+      if (norm(c.nom) === norm(cand) || norm(cand).includes(norm(c.nom)) || norm(c.nom).includes(norm(cand))) return c;
+  }
+  return null;
+}
+
+async function importerTexte(texte){
   if (!texte || !texte.trim()) return;
   // extrait cadastral modèle 1 (relevé de propriété) : parseur dédié
   if (/relev[eé]\s+de\s+propri[eé]t[eé]|extrait\s+cadastral|mod[eè]le\s*1|propri[eé]taire|\bHA\b\s+\bA\b\s+\bCA\b/i.test(texte))
     return importerModele1(texte);
+  // commune de secours pour les lignes qui n'en portent pas : devinée du texte, sinon carte 1
+  const devine = await devinerCommune(texte);
+  if (devine) cacheCommunes.set('i:' + devine.code, devine);
+  const secours = devine || (inseeChoisi ? { code: inseeChoisi, nom: nomCommune } : null);
   let dernier = null; // {insee?, nomBrut?}
   for (const brute of texte.split(/\r?\n/)) {
     const ligne = brute.trim();
@@ -576,7 +614,8 @@ function importerTexte(texte){
     const rang = { insee: insee || (dernier && dernier.insee) || null,
                    nomBrut: (dernier && dernier.nomBrut) || null,
                    nom: '', section, numero, statut: 'attente', msg: 'résolution…' };
-    if (!rang.insee && !rang.nomBrut) { rang.statut = 'erreur'; rang.msg = 'commune manquante'; }
+    if (!rang.insee && !rang.nomBrut && secours) { rang.insee = secours.code; } // commune devinée / carte 1
+    if (!rang.insee && !rang.nomBrut) { rang.statut = 'erreur'; rang.msg = 'commune manquante (aucune détectée dans le texte, aucune en carte 1)'; }
     ajouterRang(rang);
     if (rang.statut === 'attente') resoudreCommune(rang);
   }
@@ -585,15 +624,12 @@ function importerTexte(texte){
 /* Extrait cadastral modèle 1 : extraction des couples section + n° de plan.
    Commune : code INSEE détecté en tête d'extrait, sinon commune sélectionnée en carte 1.
    Filet de sécurité : chaque référence extraite est vérifiée au cadastre (✗ si inexistante). */
-function importerModele1(texte){
-  let insee = null;
-  const tete = texte.slice(0, 800);
-  // format d'en-tête modèle 1 : « DEP [DIR] 01 … COM 093 » — le plus fiable
-  const mDep = tete.match(/DEP\D{0,12}?(\d{2})\b/i);
-  const mCom = tete.match(/\bCOM(?:MUNE)?\D{0,12}?(\d{3})\b/i);
-  if (mDep && mCom) insee = mDep[1] + mCom[1];
-  if (!insee) { const m5 = tete.match(/\b(\d{5})\b/); if (m5) insee = m5[1]; } // INSEE complet en tête
-  if (!insee && inseeChoisi) insee = inseeChoisi;                              // sinon : commune de la carte 1
+async function importerModele1(texte){
+  // commune devinée du document (codes DEP+COM, INSEE, nom en clair) — sinon carte 1
+  const devine = await devinerCommune(texte);
+  if (devine) cacheCommunes.set('i:' + devine.code, devine);
+  const insee = devine ? devine.code : (inseeChoisi || null);
+  const nomDevine = devine ? devine.nom : (insee ? nomCommune : '');
   let n = 0;
   for (const brute of texte.split(/\r?\n/)) {
     const ligne = brute.trim();
@@ -602,12 +638,12 @@ function importerModele1(texte){
     for (let i = 0; i < jetons.length - 1; i++) {
       // section stricte (1-2 majuscules, unités de surface exclues) suivie d'un n° de plan
       if (/^[A-Z]{1,2}$/.test(jetons[i]) && !/^(HA|CA|M2|A)$/.test(jetons[i]) && /^\d{1,4}$/.test(jetons[i + 1])) {
-        const rang = { insee, nomBrut: null, nom: '', section: jetons[i], numero: jetons[i + 1],
+        const rang = { insee, nomBrut: null, nom: nomDevine || '', section: jetons[i], numero: jetons[i + 1],
                        statut: insee ? 'attente' : 'erreur',
-                       msg: insee ? 'vérification au cadastre…' : 'commune non identifiée — la sélectionner en carte 1 puis réimporter' };
+                       msg: insee ? 'vérification au cadastre…' : 'commune non identifiée dans l\'extrait — la sélectionner en carte 1 puis réimporter' };
         ajouterRang(rang);
         if (insee) {
-          if (insee === inseeChoisi) { rang.nom = nomCommune; verifierParcelle(rang); }
+          if (rang.nom) verifierParcelle(rang);
           else resoudreCommune(rang); // résout le nom depuis l'INSEE puis vérifie au cadastre
         }
         n++; break; // une référence par ligne dans un modèle 1
