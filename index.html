@@ -214,7 +214,7 @@
     <b>Une absence de ligne est une question à poser en mairie, jamais une conclusion.</b><br>
     <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte.
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v6.6</b>
   </div>
 </footer>
 
@@ -540,15 +540,29 @@ zone.addEventListener('drop', async e => {
   const f = e.dataTransfer.files && e.dataTransfer.files[0];
   if (f && /\.pdf$/i.test(f.name)) {
     try { importerTexte(await textePdf(f)); }
-    catch(err) { alert('Lecture du PDF impossible : ' + err.message + '. Copiez-collez son texte dans la zone.'); }
+    catch(err) { alert('Lecture du PDF impossible : ' + (err && err.message ? err.message : err) + '\n\nSolution immédiate : ouvrez le PDF, sélectionnez tout son texte (Ctrl+A, Ctrl+C) et collez-le dans la zone.\nPour m\'aider à corriger : F12 → onglet Console → copier ce qui est en rouge.'); }
   }
   else if (f) { const rd = new FileReader(); rd.onload = () => importerTexte(String(rd.result)); rd.readAsText(f); }
   else { const t = e.dataTransfer.getData('text/plain'); if (t) importerTexte(t); }
 });
 
+/* Worker pdf.js : un worker ne peut pas être chargé depuis un autre domaine (cdnjs) —
+   on récupère son code par fetch (CORS ouvert) et on le sert en blob local. */
+let workerPdfUrl = null;
+async function preparerWorkerPdf(){
+  if (workerPdfUrl) return workerPdfUrl;
+  const url = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  try {
+    const code = await (await fetch(url)).text();
+    workerPdfUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+  } catch(e) { workerPdfUrl = url; } // dernier recours : URL directe
+  return workerPdfUrl;
+}
+
 /* Extraction du texte d'un PDF (pdf.js), lignes reconstituées par position verticale */
 async function textePdf(fichier){
-  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  if (typeof pdfjsLib === 'undefined') throw new Error('bibliothèque PDF non chargée (pdf.min.js)');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = await preparerWorkerPdf();
   const doc = await pdfjsLib.getDocument({ data: await fichier.arrayBuffer() }).promise;
   const pages = [];
   for (let p = 1; p <= doc.numPages; p++) {
@@ -593,17 +607,26 @@ async function devinerCommune(texte){
   const geo = async p => { try { const r = await (await fetch('https://geo.api.gouv.fr/communes?' + p + '&fields=code,nom&limit=2')).json(); return Array.isArray(r) ? r : []; } catch { return []; } };
   // en-tête SPDC réel (extrait modèle 1) : « Département : 059 … Commune : NOM 009 »
   // — le département est sur 3 chiffres et le code commune SUIT le nom (constaté sur pièce le 20/08)
-  const mSpdc = tete.match(/D[eé]partement\s*:?\s*0?(\d{2})\d?\b[\s\S]{0,80}?Commune\s*:?\s*([A-ZÀ-Ý][A-ZÀ-Ý' -]*?)\s*(\d{3})\b/i);
+  // ⚠ selon l'extracteur, le code à 3 chiffres sort AVANT ou APRÈS le nom (« 009 VILLENEUVE D ASCQ »
+  // en navigateur, « VILLENEUVE D ASCQ 009 » ailleurs) : on capture le segment entier et on y prend les deux.
+  const mSpdc = tete.match(/D[eé]partement\s*:?\s*0?(\d{2})\d?\b[\s\S]{0,120}?Commune\s*:?\s*([^\n]{1,70})/i);
   if (mSpdc) {
-    const insee = mSpdc[1] + mSpdc[3];
-    const cs = await geo('code=' + insee);
-    if (cs.length) return cs[0];
-    const anc = await communeAncienne(insee);
-    if (anc) return anc;
-    // repli : le nom en clair, validé par concordance ou par alignement sur le code commune
-    const csN = await geo('nom=' + encodeURIComponent(mSpdc[2].trim()) + '&boost=population&limit=5');
-    for (const c of csN)
-      if (norm(c.nom) === norm(mSpdc[2]) || c.code.slice(-3) === mSpdc[3]) return c;
+    const dep = mSpdc[1], seg = mSpdc[2];
+    const mC3 = seg.match(/\b(\d{3})\b/);
+    const nomSeg = seg.replace(/\b\d{3}\b/, '').replace(/\s{2,}/g, ' ').trim();
+    if (mC3) {
+      const insee = dep + mC3[1];
+      const cs = await geo('code=' + insee);
+      if (cs.length) return cs[0];
+      const anc = await communeAncienne(insee);
+      if (anc) return anc;
+    }
+    if (nomSeg.length >= 3) {
+      // repli : le nom en clair validé par concordance, filtré sur le département
+      const csN = await geo('nom=' + encodeURIComponent(nomSeg) + '&boost=population&limit=5&codeDepartement=' + dep);
+      for (const c of csN)
+        if (norm(c.nom) === norm(nomSeg) || (mC3 && c.code.slice(-3) === mC3[1])) return c;
+    }
   }
 
   // « DEP », « DÉP », « Département »… et le code commune à 3 chiffres
