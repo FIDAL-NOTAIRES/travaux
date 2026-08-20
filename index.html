@@ -636,6 +636,15 @@ function majBouton(){
 
 const ech = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fdate = s => { if (!s) return null; const [a,m,j] = String(s).split('-'); return j && m ? j+'/'+m+'/'+a : s; };
+// Ancienneté en années révolues (arrondi inférieur) depuis une date ISO, ou depuis une année seule
+function anciennete(dateIso, annee){
+  let ms = null;
+  if (dateIso) ms = Date.now() - new Date(dateIso).getTime();
+  else if (annee) ms = Date.now() - new Date(annee + '-07-01').getTime(); // année seule : milieu d'année
+  if (ms === null || isNaN(ms) || ms < 0) return null;
+  const ans = Math.floor(ms / (365.25 * 24 * 3600 * 1000));
+  return ans <= 0 ? 'il y a moins d\'un an' : 'il y a ' + ans + ' an' + (ans > 1 ? 's' : '');
+}
 const fm2 = n => Math.round(n).toLocaleString('fr-FR') + ' m²';
 const COUL = { PC:'var(--nuit)', DP:'var(--canard)', PA:'var(--bleugris)', PD:'var(--carmin)' };
 let numCarte = 0; const cartesEnAttente = [];
@@ -809,7 +818,11 @@ function carteAutor(a){
   else if (a.anneeDepot)    lg.push(['Année de dépôt', a.anneeDepot]);
   if (a.dates.autorisation) lg.push(['Autorisation', fdate(a.dates.autorisation)]);
   if (a.dates.chantier)     lg.push(['Ouverture de chantier', fdate(a.dates.chantier)]);
-  lg.push(['DAACT', a.dates.daact ? fdate(a.dates.daact) : '<span class="alerte-daact">non renseignée dans Sitadel</span>']);
+  const ageAut = anciennete(a.dates.autorisation, a.anneeDepot);
+  const ageDoc = anciennete(a.dates.chantier, null);
+  lg.push(['DAACT', a.dates.daact ? fdate(a.dates.daact) :
+    '<span class="alerte-daact">non renseignée dans Sitadel' +
+    (ageAut ? ' — autorisation ' + ageAut : '') + (ageDoc ? ', chantier ouvert ' + ageDoc : '') + '</span>']);
   if (a.nature)                     lg.push(['Nature', a.nature]);
   if (a.surfaces.habCreee)          lg.push(['Surface habitation créée', a.surfaces.habCreee + ' m²']);
   if (a.surfaces.locCreee)          lg.push(['Surface locaux créée', a.surfaces.locCreee + ' m²']);
@@ -991,7 +1004,14 @@ function matiereExport(a){
       if (au.parcelles.length > 1) paires.push(['Parcelles de l\'autorisation', au.parcelles.map(x => (x.section||'?') + ' ' + (x.numero||'?')).join(', ')]);
       if (au.demandeur.nom) paires.push(['Demandeur', au.demandeur.nom + (au.demandeur.siren ? ' (SIREN ' + au.demandeur.siren + ')' : '')]);
       for (const px of paires) m.lignesA1.push({ niv: 'paire', label: px[0], val: px[1] });
-      if (!au.dates.daact) m.lignesA1.push({ t: 'Vigilance : DAACT non retrouvée — pièce à obtenir (délai de contestation : R. 462-6 C. urb.).', niv: 'vigilance' });
+      if (!au.dates.daact) {
+        const ageAut = anciennete(au.dates.autorisation, au.anneeDepot);
+        const ageDoc = anciennete(au.dates.chantier, null);
+        m.lignesA1.push({ t: 'Vigilance : DAACT non retrouvée — pièce à obtenir.' +
+          (ageAut ? ' Autorisation délivrée ' + ageAut : '') +
+          (ageDoc ? ', chantier ouvert ' + ageDoc : '') + '.' +
+          ' Rappel : les délais courent de l\'achèvement des travaux (prescriptions) et de la réception de la DAACT en mairie (contestation, R. 462-6 C. urb.) — non de la délivrance de l\'autorisation.', niv: 'vigilance' });
+      }
     }
   }
   return m;
@@ -1025,12 +1045,24 @@ function pointsAttention(){
         pts.push({ n: 'orange', p: titre, t: 'Bâti présent, aucune autorisation dans Sitadel (pré-2013 et DP mineures hors champ) — relevé des autorisations en mairie à obtenir.' });
     }
     if (a.rA1) for (const au of a.rA1.autorisations)
-      if (!au.dates.daact)
-        pts.push({ n: 'orange', p: titre, t: 'DAACT non retrouvée pour ' + au.type + ' ' + au.numero + ' — pièce à obtenir.' });
+      if (!au.dates.daact) {
+        const ageAut = anciennete(au.dates.autorisation, au.anneeDepot);
+        const ageDoc = anciennete(au.dates.chantier, null);
+        pts.push({ n: 'orange', p: titre, t: 'DAACT non retrouvée pour ' + au.type + ' ' + au.numero +
+          (ageAut ? ' (autorisation ' + ageAut + (ageDoc ? ', chantier ouvert ' + ageDoc : '') + ')' : '') + ' — pièce à obtenir.' });
+      }
   }
   pts.sort((x, y) => (x.n === 'carmin' ? 0 : 1) - (y.n === 'carmin' ? 0 : 1));
   return pts;
 }
+
+/* Rappel des délais — textes vérifiés sur Légifrance le 20/08/2026 (addendum textes v1) */
+const DELAIS_EXPORT = [
+  'Action pénale (art. L. 480-4 C. urb.) : le délit d\'exécution de travaux sans autorisation ou en méconnaissance des prescriptions d\'une autorisation se prescrit par 6 ans à compter de l\'achèvement des travaux (art. 8 C. proc. pén.).',
+  'Prescription administrative (art. L. 421-9 C. urb.) : construction achevée depuis plus de 10 ans — le refus d\'autorisation ne peut plus être fondé sur l\'irrégularité initiale, sauf exceptions, notamment : aucun permis obtenu alors qu\'il était requis (5°), domaine public (4°), zones exposées d\'un PPRN (6°). Les travaux excédant un permis obtenu bénéficient de la prescription, mais restent pénalement punissables dans le délai de 6 ans.',
+  'Contestation de la conformité (art. R. 462-6 C. urb.) : 3 mois à compter de la réception de la DAACT en mairie, portés à 5 mois lorsqu\'un récolement est obligatoire (art. R. 462-7).',
+  'Déclaration fiscale (art. 1406 CGI) : 90 jours de la réalisation définitive — police distincte de l\'urbanisme.'
+];
 
 const RESERVES_EXPORT = 'Réserves : Sitadel ne couvre ni le pré-2013, ni les DP sans création de surface, ni les refus — une absence de ligne est une question à poser en mairie, jamais une conclusion. Plan cadastral (murs) et photogrammétrie (débords compris) ne mesurent pas la même chose : écart de quelques % structurel ; seuil de 5 % provisoire, non calibré. Un écart se présente « à instruire », jamais comme une irrégularité. Document de travail interne — ne fait pas foi de la régularité des constructions. Sources : SDES / data.gouv.fr, IGN Géoplateforme (Licence Ouverte).';
 
@@ -1115,6 +1147,22 @@ $('expPdf').onclick = async () => {
           pdf.text(lignesT, GX + 5, ty + 3.8);
           ty += h;
         }
+      }
+
+      // ------- rappel des délais applicables (textes vérifiés — addendum du 20/08/2026) -------
+      ty += 6;
+      if (ty > 240) { pdf.addPage(); ty = 20; }
+      pdf.setFillColor(...NUIT); pdf.rect(GX - 2, ty - 5, 190, 7.5, 'F');
+      pdf.setFont('helvetica','bold'); pdf.setFontSize(8.5); pdf.setTextColor(255,255,255);
+      pdf.text('Rappel des délais applicables', GX, ty);
+      ty += 8.5;
+      for (const d of DELAIS_EXPORT) {
+        pdf.setFont('helvetica','normal'); pdf.setFontSize(7.8); pdf.setTextColor(...NOIR);
+        const lignesD = pdf.splitTextToSize(pdfTxt(d), 183);
+        if (ty + lignesD.length * 3.3 > 268) { pdf.addPage(); ty = 20; }
+        pdf.setFillColor(...CANARD); pdf.rect(GX, ty - 2.2, 2.2, 2.2, 'F');
+        pdf.text(lignesD, GX + 5, ty);
+        ty += lignesD.length * 3.3 + 2.4;
       }
 
       pdf.setFont('helvetica','italic'); pdf.setFontSize(6.5); pdf.setTextColor(...GRIS);
@@ -1290,7 +1338,7 @@ $('expWord').onclick = async () => {
       const pts = pointsAttention();
       enfants.push(new D.Paragraph({ // même format que l'en-tête du tableau (fond bleu nuit)
         shading: { fill: NUIT }, spacing: { before: 280, after: 100 },
-        children: [ new D.TextRun({ text: '  POINTS D’ATTENTION ET ALERTES', font: 'Segoe UI', size: 18, bold: true, color: 'FFFFFF' }) ]
+        children: [ new D.TextRun({ text: '  Points d’attention et alertes', font: 'Segoe UI', size: 18, bold: true, color: 'FFFFFF' }) ]
       }));
       if (!pts.length) {
         enfants.push(P(T('Aucun point d’attention relevé sur les parcelles analysées.', { size: 18, italics: true, color: GRIS })));
@@ -1304,6 +1352,14 @@ $('expWord').onclick = async () => {
           ], { spacing: { after: 60 } }));
         }
       }
+
+      // ------- rappel des délais applicables (textes vérifiés — addendum du 20/08/2026) -------
+      enfants.push(new D.Paragraph({
+        shading: { fill: NUIT }, spacing: { before: 280, after: 100 },
+        children: [ new D.TextRun({ text: '  Rappel des délais applicables', font: 'Segoe UI', size: 18, bold: true, color: 'FFFFFF' }) ]
+      }));
+      for (const d of DELAIS_EXPORT)
+        enfants.push(P([ T('■ ', { size: 16, color: CANARD }), T(d, { size: 16, color: NOIR }) ], { spacing: { after: 60 } }));
 
       enfants.push(P(T(RESERVES_EXPORT, { size: 14, italics: true, color: GRIS }), { spacing: { before: 240 } }));
     }
