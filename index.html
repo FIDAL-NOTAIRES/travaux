@@ -215,7 +215,7 @@
     <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.
     <b>Géoréférencement</b> : certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l'orthophoto (calage feuille par feuille du PCI) — un contour qui semble déporté sur la photo n'est pas une anomalie de la parcelle ; comparer les formes, pas la superposition.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v6.7</b>
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v6.9</b>
   </div>
 </footer>
 
@@ -773,9 +773,24 @@ async function verifierParcelle(r){
     const sec = r.section.trim().toUpperCase().replace(/^0+(?=[A-Z])/,'').padStart(2,'0');
     const num = String(parseInt(r.numero,10)).padStart(4,'0');
     const pab = r.prefixe && r.prefixe !== '000' ? '&com_abs=' + r.prefixe : ''; // ancienne commune : préfixe cadastral
-    const rep = await (await fetch('https://apicarto.ign.fr/api/cadastre/parcelle?code_insee=' + r.insee + '&section=' + sec + '&numero=' + num + pab + '&_limit=1')).json();
+    const base = 'https://apicarto.ign.fr/api/cadastre/parcelle?code_insee=' + r.insee + pab;
+    const rep = await (await fetch(base + '&section=' + sec + '&numero=' + num + '&_limit=1')).json();
     if (rep.features && rep.features.length) { r.statut = 'ok'; r.msg = ''; }
-    else { r.statut = 'erreur'; r.msg = 'parcelle introuvable au cadastre (' + r.section + ' ' + parseInt(r.numero,10) + (r.prefixe ? ', préfixe ' + r.prefixe : '') + ') — vérifier section et numéro'; }
+    else {
+      // diagnostic : la section existe-t-elle ? combien de parcelles y porte-t-elle ?
+      r.statut = 'erreur';
+      const ref = r.section + ' ' + parseInt(r.numero, 10) + (r.prefixe && r.prefixe !== '000' ? ', préfixe ' + r.prefixe : '');
+      try {
+        const secRep = await (await fetch(base + '&section=' + sec + '&_limit=1')).json();
+        const nb = secRep.totalFeatures || 0;
+        if (!nb) r.msg = 'section ' + r.section + ' inexistante ici (' + ref + ') — vérifier la section, ou ancienne lettre de section';
+        else {
+          const ex = secRep.features && secRep.features[0] ? parseInt(secRep.features[0].properties.numero, 10) : null;
+          r.msg = 'n° absent de la section ' + r.section + ' (' + nb + ' parcelles' + (ex ? ', ex. n° ' + ex : '') + ') — ' +
+                  'numéro inexistant ou ANCIENNE NUMÉROTATION (renumérotation, remembrement) : vérifier sur un document récent';
+        }
+      } catch { r.msg = 'parcelle introuvable au cadastre (' + ref + ') — vérifier section et numéro'; }
+    }
   } catch {
     // service indisponible : on n'invalide pas la ligne, l'analyse tranchera
     r.statut = 'ok'; r.msg = '';
@@ -1119,18 +1134,25 @@ const FONDS_EXPORT = [
   { nom: 'histo', couche: 'ORTHOIMAGERY.ORTHOPHOTOS.1950-1965',  format: 'image/png',  libelle: 'Photo aérienne 1950-1965' }
 ];
 
+// Anneaux (listes de points [lng,lat]) d'une géométrie GeoJSON, Polygon ou MultiPolygon
+function anneauxDe(g){
+  const geom = g && g.type === 'Feature' ? g.geometry : g;
+  if (!geom) return [];
+  if (geom.type === 'Polygon') return geom.coordinates;
+  if (geom.type === 'MultiPolygon') return geom.coordinates.flat();
+  return [];
+}
+
 async function carteExportImage(parcelle, fond, voisins){
   const atelier = document.getElementById('atelier');
   atelier.innerHTML = '<div id="atelier-carte" style="width:640px;height:640px"></div>';
   const couche = coucheWMTS(fond.couche, fond.format);
-  const map = L.map('atelier-carte', { layers: [couche], zoomControl: false, attributionControl: false });
-  // limites des parcelles voisines (contexte cadastral, comme URBA) — pas sur la photo historique
-  if (voisins && voisins.length && fond.nom !== 'histo')
-    L.geoJSON({ type: 'FeatureCollection', features: voisins },
-      { style: { color: fond.nom === 'ortho' ? '#FFFFFF' : '#3a3a3a', weight: 1, fill: false, opacity: 0.85 } }).addTo(map);
-  // contour carmin — cohérence avec REDPAR
-  const contour = L.geoJSON(parcelle, { style: { color: '#A01040', weight: 4, fillColor: '#A01040', fillOpacity: 0.06 } }).addTo(map);
-  map.fitBounds(contour.getBounds().pad(0.35), { maxZoom: 18 });
+  // ⚠ AUCUNE couche vectorielle sur la carte : html2canvas décale les SVG de Leaflet
+  // (constaté le 20/08 : tuiles justes, contours glissés). On capture les tuiles seules,
+  // puis on dessine les contours nous-mêmes sur l'image, aux coordonnées de la carte.
+  const map = L.map('atelier-carte', { layers: [couche], zoomControl: false, attributionControl: false,
+                                       fadeAnimation: false, zoomAnimation: false });
+  map.fitBounds(L.geoJSON(parcelle).getBounds().pad(0.35), { maxZoom: 18 });
   // attendre le chargement des tuiles (filet à 3 s pour les zones lentes)
   await new Promise(res => { let fini = false;
     const ok = () => { if (!fini) { fini = true; setTimeout(res, 300); } };
@@ -1138,6 +1160,24 @@ async function carteExportImage(parcelle, fond, voisins){
   let img = null;
   try {
     const cv = await html2canvas(document.getElementById('atelier-carte'), { useCORS: true, scale: 2, logging: false });
+    const ctx = cv.getContext('2d');
+    const k = cv.width / 640; // échelle de capture
+    const tracer = (geo, style) => {
+      for (const anneau of anneauxDe(geo)) {
+        ctx.beginPath();
+        anneau.forEach((pt, i) => {
+          const p = map.latLngToContainerPoint([pt[1], pt[0]]);
+          if (i) ctx.lineTo(p.x * k, p.y * k); else ctx.moveTo(p.x * k, p.y * k);
+        });
+        ctx.closePath();
+        if (style.remplir) { ctx.fillStyle = style.remplir; ctx.fill(); }
+        ctx.strokeStyle = style.trait; ctx.lineWidth = style.epaisseur * k; ctx.stroke();
+      }
+    };
+    if (voisins && voisins.length && fond.nom !== 'histo')
+      for (const f of voisins)
+        tracer(f, { trait: fond.nom === 'ortho' ? 'rgba(255,255,255,0.85)' : 'rgba(58,58,58,0.85)', epaisseur: 1 });
+    tracer(parcelle, { trait: '#A01040', epaisseur: 3.5, remplir: 'rgba(160,16,64,0.06)' }); // carmin — cohérence REDPAR
     img = { data: cv.toDataURL('image/png'), w: cv.width, h: cv.height };
   } catch(e) { /* tuiles non capturables : vignette absente, export poursuivi */ }
   map.remove(); atelier.innerHTML = '';
