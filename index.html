@@ -997,6 +997,41 @@ function matiereExport(a){
   return m;
 }
 
+/* Synthèse des points d'attention et alertes de toutes les parcelles analysées (page 1 des exports) */
+function pointsAttention(){
+  const pts = [];
+  for (const a of ANALYSES) {
+    const titre = a.p.nom + ' ' + a.p.section.toUpperCase() + ' ' + String(parseInt(a.p.numero,10));
+    if (!a.rA1) pts.push({ n: 'carmin', p: titre, t: 'Sitadel indisponible — parcelle à retraiter.' });
+    else if (a.rA1.indisponibles && a.rA1.indisponibles.length)
+      pts.push({ n: 'carmin', p: titre, t: 'Réponse Sitadel incomplète (' + a.rA1.indisponibles.join(', ') + ') — à retraiter.' });
+    if (!a.rA3 || a.rA3.erreur) {
+      pts.push({ n: 'carmin', p: titre, t: 'Emprises indisponibles — comparaison du bâti non faite.' });
+    } else {
+      const A = a.rA3.cadastre.total, B = a.rA3.topo.total;
+      const ec = A > 0 ? (B - A) / A : null;
+      if (A < SURFACE_MIN && B >= SURFACE_MIN)
+        pts.push({ n: 'carmin', p: titre, t: 'Bâti visible en photogrammétrie (' + fnum(B) + ' m²) sans bâti significatif au plan cadastral — à instruire.' });
+      else if (ec !== null && ec > SEUIL_ECART) {
+        if (a.rA1 && !a.rA1.autorisations.length)
+          pts.push({ n: 'carmin', p: titre, t: 'Écart d\'emprise de +' + (ec * 100).toFixed(1) + ' % sans aucune autorisation Sitadel — vérification en mairie indispensable.' });
+        else
+          pts.push({ n: 'orange', p: titre, t: 'Écart d\'emprise de +' + (ec * 100).toFixed(1) + ' % (seuil provisoire 5 %) — à instruire.' });
+      }
+      // bâti significatif sans aucune autorisation retrouvée : relevé mairie à obtenir
+      // (sauf si une alerte carmin couvre déjà cette parcelle : écart hors seuil ou bâti sans plan)
+      if (B >= SURFACE_MIN && a.rA1 && !a.rA1.autorisations.length
+          && !(ec !== null && ec > SEUIL_ECART) && !(A < SURFACE_MIN && B >= SURFACE_MIN))
+        pts.push({ n: 'orange', p: titre, t: 'Bâti présent, aucune autorisation dans Sitadel (pré-2013 et DP mineures hors champ) — relevé des autorisations en mairie à obtenir.' });
+    }
+    if (a.rA1) for (const au of a.rA1.autorisations)
+      if (!au.dates.daact)
+        pts.push({ n: 'orange', p: titre, t: 'DAACT non retrouvée pour ' + au.type + ' ' + au.numero + ' — pièce à obtenir.' });
+  }
+  pts.sort((x, y) => (x.n === 'carmin' ? 0 : 1) - (y.n === 'carmin' ? 0 : 1));
+  return pts;
+}
+
 const RESERVES_EXPORT = 'Réserves : Sitadel ne couvre ni le pré-2013, ni les DP sans création de surface, ni les refus — une absence de ligne est une question à poser en mairie, jamais une conclusion. Plan cadastral (murs) et photogrammétrie (débords compris) ne mesurent pas la même chose : écart de quelques % structurel ; seuil de 5 % provisoire, non calibré. Un écart se présente « à instruire », jamais comme une irrégularité. Document de travail interne — ne fait pas foi de la régularité des constructions. Sources : SDES / data.gouv.fr, IGN Géoplateforme (Licence Ouverte).';
 
 /* ----- PDF : UNE PAGE PAR PARCELLE — chiffres en colonne à gauche (carte dessous), texte à droite ----- */
@@ -1051,9 +1086,42 @@ $('expPdf').onclick = async () => {
       if (lignes.some(l => /\*$/.test(l.lieuDit))) {
         pdf.setFont('helvetica','italic'); pdf.setFontSize(7); pdf.setTextColor(...GRIS);
         pdf.text('* lieu-dit approché par l\'adresse la plus proche (BAN).', GX, ty + 3);
+        ty += 4;
       }
+
+      // ------- points d'attention et alertes, sous la liste des parcelles -------
+      const pts = pointsAttention();
+      ty += 9;
+      if (ty > 258) { pdf.addPage(); ty = 20; }
+      pdf.setFillColor(...CANARD); pdf.rect(GX - 2, ty - 5, 190, 7.5, 'F');
+      pdf.setFont('helvetica','bold'); pdf.setFontSize(9.5); pdf.setTextColor(255,255,255);
+      pdf.text('POINTS D\'ATTENTION ET ALERTES', GX, ty);
+      ty += 9;
+      if (!pts.length) {
+        pdf.setFont('helvetica','italic'); pdf.setFontSize(8.5); pdf.setTextColor(...GRIS);
+        pdf.text('Aucun point d\'attention relevé sur les parcelles analysées.', GX, ty);
+        ty += 6;
+      } else {
+        for (const pt of pts) {
+          const coul = pt.n === 'carmin' ? CARMIN : ORANGE;
+          pdf.setFont('helvetica','normal'); pdf.setFontSize(8.5);
+          const lignesT = pdf.splitTextToSize(pdfTxt(pt.t), 183);
+          const h = 3.8 + lignesT.length * 3.5 + 2.2;
+          if (ty + h > 268) { pdf.addPage(); ty = 20; }
+          pdf.setFillColor(...coul); pdf.rect(GX, ty - 2.4, 2.6, 2.6, 'F');
+          pdf.setFont('helvetica','bold'); pdf.setTextColor(...coul);
+          pdf.text(pdfTxt(pt.p), GX + 5, ty);
+          pdf.setFont('helvetica','normal'); pdf.setTextColor(...NOIR);
+          pdf.text(lignesT, GX + 5, ty + 3.8);
+          ty += h;
+        }
+      }
+
       pdf.setFont('helvetica','italic'); pdf.setFontSize(6.5); pdf.setTextColor(...GRIS);
-      pdf.text(pdf.splitTextToSize(pdfTxt(RESERVES_EXPORT), 186), GX, 285);
+      { // bloc réserves calé pour FINIR à 282 mm — jamais coupé à l'impression, jamais sur le pied de page
+        const lignesR = pdf.splitTextToSize(pdfTxt(RESERVES_EXPORT), 186);
+        pdf.text(lignesR, GX, 282 - (lignesR.length - 1) * 2.9);
+      }
     }
 
     for (let i = 0; i < ANALYSES.length; i++) {
@@ -1171,9 +1239,9 @@ $('expPdf').onclick = async () => {
     for (let p = 1; p <= nbPages; p++) {
       pdf.setPage(p);
       pdf.setFont('helvetica','italic'); pdf.setFontSize(7); pdf.setTextColor(...GRIS);
-      pdf.text('TRAVAUX — fiche du ' + dateJour() + ' — document de travail interne, ne fait pas foi de la régularité des constructions', GX, 292);
+      pdf.text('TRAVAUX — fiche du ' + dateJour() + ' — document de travail interne, ne fait pas foi de la régularité des constructions', GX, 287.5);
       pdf.setFont('helvetica','normal');
-      pdf.text('p. ' + p + ' / ' + nbPages, 198, 292, { align: 'right' });
+      pdf.text('p. ' + p + ' / ' + nbPages, 198, 287.5, { align: 'right' });
     }
     pdf.save(dateJour() + ' travaux-fiche.pdf');
   } catch(e) {
@@ -1217,6 +1285,26 @@ $('expWord').onclick = async () => {
       enfants.push(new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, rows: rangs }));
       if (lignes.some(l => /\*$/.test(l.lieuDit)))
         enfants.push(P(T('* lieu-dit approché par l’adresse la plus proche (BAN).', { size: 14, italics: true, color: GRIS }), { spacing: { before: 80 } }));
+
+      // ------- points d'attention et alertes, sous la liste des parcelles -------
+      const pts = pointsAttention();
+      enfants.push(new D.Paragraph({
+        shading: { fill: CANARD }, spacing: { before: 280, after: 100 },
+        children: [ new D.TextRun({ text: '  POINTS D’ATTENTION ET ALERTES', font: 'Segoe UI', size: 20, bold: true, color: 'FFFFFF' }) ]
+      }));
+      if (!pts.length) {
+        enfants.push(P(T('Aucun point d’attention relevé sur les parcelles analysées.', { size: 18, italics: true, color: GRIS })));
+      } else {
+        for (const pt of pts) {
+          const coul = pt.n === 'carmin' ? CARMIN : 'B25F00';
+          enfants.push(P([
+            T('■ ', { size: 18, color: coul }),
+            T(pt.p + ' — ', { size: 18, bold: true, color: coul }),
+            T(pt.t, { size: 18, color: NOIR })
+          ], { spacing: { after: 60 } }));
+        }
+      }
+
       enfants.push(P(T(RESERVES_EXPORT, { size: 14, italics: true, color: GRIS }), { spacing: { before: 240 } }));
     }
 
