@@ -327,10 +327,11 @@ const EMPRISES = (() => {
   }
 
   // Géométrie de la parcelle — API Carto (section paddée 2, numéro paddé 4, comme URBA)
-  async function geometrieParcelle({insee, section, numero}){
+  async function geometrieParcelle({insee, section, numero, prefixe}){
     const sec = section.trim().toUpperCase().replace(/^0+(?=[A-Z])/,'').padStart(2,'0');
     const num = String(parseInt(numero,10)).padStart(4,'0');
-    const fc = await geoJson(APICARTO + '?code_insee=' + insee + '&section=' + sec + '&numero=' + num);
+    const pab = prefixe && prefixe !== '000' ? '&com_abs=' + prefixe : ''; // ancienne commune (leçon CERTIF)
+    const fc = await geoJson(APICARTO + '?code_insee=' + insee + '&section=' + sec + '&numero=' + num + pab);
     if (!fc.features || !fc.features.length) return null;
     return fc.features[0];
   }
@@ -448,15 +449,24 @@ const EMPRISES = (() => {
 /* ---------- 3. SAISIE — liste multi-communes (accroche large → validation fine) ---------- */
 
 const $ = id => document.getElementById(id);
-let inseeChoisi = null, nomCommune = '';
+let inseeChoisi = null, nomCommune = '', prefixeChoisi = null;
 const LISTE = []; // { insee, nom, section, numero, statut:'ok'|'attente'|'erreur', msg }
 let idListe = 0;
 
 /* -- Autocomplétion de commune (carte 1) -- */
 let minuteur = null, suggestionsCourantes = [];
 
-function choisirCommune(c){
-  inseeChoisi = c.code; nomCommune = c.nom;
+async function choisirCommune(c){
+  if (c.ancienne) { // ancienne commune (fusion) : résolue vers la commune actuelle + préfixe cadastral
+    const r = await communeAncienne(c.ancienne.code);
+    if (!r) { $('communeInfo').innerHTML = '<span class="ko">✗ rattachement introuvable</span>'; return; }
+    inseeChoisi = r.code; nomCommune = r.nom; prefixeChoisi = r.prefixe;
+    $('commune').value = r.nom;
+    fermerSuggestions();
+    $('communeInfo').innerHTML = '<span class="ok">✓ ' + r.nom + '</span> — INSEE ' + r.code + ' · préfixe cadastral ' + r.prefixe;
+    return;
+  }
+  inseeChoisi = c.code; nomCommune = c.nom; prefixeChoisi = null;
   $('commune').value = c.nom;
   fermerSuggestions();
   $('communeInfo').innerHTML = '<span class="ok">✓ ' + c.nom + '</span> — INSEE ' + c.code +
@@ -487,6 +497,15 @@ $('commune').addEventListener('input', () => {
         (parCP ? 'codePostal=' + q : 'nom=' + encodeURIComponent(q) + '&boost=population') +
         '&fields=code,nom,codesPostaux&limit=8';
       const cs = await (await fetch(url)).json();
+      if (!cs.length && !parCP) { // pas de commune actuelle : chercher parmi les anciennes communes (fusions)
+        try {
+          const as = await (await fetch('https://geo.api.gouv.fr/communes_associees_deleguees?nom=' + encodeURIComponent(q) + '&fields=code,nom&limit=5')).json();
+          if (Array.isArray(as) && as.length) {
+            afficherSuggestions(as.slice(0, 5).map(a => ({ code: a.code, nom: a.nom + ' (ancienne commune)', ancienne: a })));
+            return;
+          }
+        } catch(e) {}
+      }
       if (!cs.length) { fermerSuggestions(); $('communeInfo').innerHTML = '<span class="ko">✗ commune inconnue</span>'; return; }
       if (cs.length === 1) { choisirCommune(cs[0]); return; }
       afficherSuggestions(cs);
@@ -504,7 +523,7 @@ $('ajouterListe').onclick = () => {
   const section = $('sec1').value.trim(), numero = $('num1').value.trim();
   if (!inseeChoisi) { $('communeInfo').innerHTML = '<span class="ko">✗ choisir d\'abord une commune</span>'; return; }
   if (!section || !/^\d+$/.test(numero)) return;
-  const rang = { insee: inseeChoisi, nom: nomCommune, section: section.toUpperCase(), numero, statut: 'attente', msg: 'vérification au cadastre…' };
+  const rang = { insee: inseeChoisi, nom: nomCommune, prefixe: prefixeChoisi, section: section.toUpperCase(), numero, statut: 'attente', msg: 'vérification au cadastre…' };
   ajouterRang(rang);
   verifierParcelle(rang);
   $('sec1').value = ''; $('num1').value = ''; $('sec1').focus();
@@ -555,20 +574,40 @@ async function textePdf(fichier){
 /* Devine la commune d'un document collé ou glissé, par essais successifs :
    1. codes DEP + COM (en-tête modèle 1)  2. INSEE ou code postal isolé en tête
    3. nom en clair (« COM 093 NOM », « commune de NOM ») validé contre geo.api.gouv.fr */
+/* Commune fusionnée / absorbée (leçon CERTIF, mémo v3 § 8 — Lomme 59355 → Lille 59350, préfixe 355) :
+   le code d'une ancienne commune se résout en (commune actuelle + préfixe cadastral) */
+async function communeAncienne(code){
+  try {
+    const r = await (await fetch('https://geo.api.gouv.fr/communes_associees_deleguees/' + code)).json();
+    if (r && r.chefLieu) {
+      const chef = await (await fetch('https://geo.api.gouv.fr/communes/' + r.chefLieu + '?fields=code,nom')).json();
+      if (chef && chef.code) return { code: chef.code, nom: chef.nom + ' — ' + r.nom, prefixe: code.slice(2) };
+    }
+  } catch(e) {}
+  return null;
+}
+
 async function devinerCommune(texte){
   const tete = texte.slice(0, 1200);
   const norm = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/gi, '').toLowerCase();
   const geo = async p => { try { const r = await (await fetch('https://geo.api.gouv.fr/communes?' + p + '&fields=code,nom&limit=2')).json(); return Array.isArray(r) ? r : []; } catch { return []; } };
-  const mDep = tete.match(/DEP\D{0,12}?(\d{2})\b/i);
+  // « DEP », « DÉP », « Département »… et le code commune à 3 chiffres
+  const mDep = tete.match(/D[EÉ]P[A-ZÉ]*\D{0,10}?(\d{2})\b/i);
   const mCom = tete.match(/\bCOM(?:MUNE)?\D{0,12}?(\d{3})\b/i);
   if (mDep && mCom) {
-    const cs = await geo('code=' + mDep[1] + mCom[1]);
+    const code = mDep[1] + mCom[1];
+    const cs = await geo('code=' + code);
     if (cs.length) return cs[0];
+    const anc = await communeAncienne(code);      // commune fusionnée : Lomme → Lille + préfixe 355
+    if (anc) return anc;
+    // code composé introuvable : on continue sur le nom
   }
   const m5 = tete.match(/\b(\d{5})\b/);
   if (m5) {
     let cs = await geo('code=' + m5[1]);          // INSEE
     if (cs.length) return cs[0];
+    const anc = await communeAncienne(m5[1]);     // INSEE d'une ancienne commune
+    if (anc) return anc;
     cs = await geo('codePostal=' + m5[1]);        // code postal, seulement s'il est sans ambiguïté
     if (cs.length === 1) return cs[0];
   }
@@ -579,9 +618,13 @@ async function devinerCommune(texte){
   if (m) cands.push(m[1]);
   for (let cand of cands) {
     cand = cand.trim().replace(/\s{2,}/g, ' ');
-    const cs = await geo('nom=' + encodeURIComponent(cand) + '&boost=population' + (mDep ? '&codeDepartement=' + mDep[1] : ''));
-    for (const c of cs)
+    const cs = await geo('nom=' + encodeURIComponent(cand) + '&boost=population' + (mDep ? '&codeDepartement=' + mDep[1] : '') + '&limit=5');
+    for (const c of cs) {
+      // accepté si le nom concorde (sans accents, apostrophes ni tirets)…
       if (norm(c.nom) === norm(cand) || norm(cand).includes(norm(c.nom)) || norm(c.nom).includes(norm(cand))) return c;
+      // …ou si le code INSEE s'ALIGNE sur le code commune de l'en-tête (nom estropié, OCR, abréviations)
+      if (mCom && c.code.slice(-3) === mCom[1] && (!mDep || c.code.slice(0, 2) === mDep[1])) return c;
+    }
   }
   return null;
 }
@@ -594,18 +637,21 @@ async function importerTexte(texte){
   // commune de secours pour les lignes qui n'en portent pas : devinée du texte, sinon carte 1
   const devine = await devinerCommune(texte);
   if (devine) cacheCommunes.set('i:' + devine.code, devine);
-  const secours = devine || (inseeChoisi ? { code: inseeChoisi, nom: nomCommune } : null);
+  const secours = devine || (inseeChoisi ? { code: inseeChoisi, nom: nomCommune, prefixe: prefixeChoisi } : null);
   let dernier = null; // {insee?, nomBrut?}
   for (const brute of texte.split(/\r?\n/)) {
     const ligne = brute.trim();
     if (!ligne) continue;
     const jetons = ligne.split(/[\t;,]+|\s{1,}/).map(j => j.trim()).filter(Boolean);
     let insee = null, section = null, numero = null; const motsCommune = [];
-    for (const j of jetons) {
-      if (!insee && /^\d{5}$/.test(j) && !(numero === null && section !== null)) { insee = j; continue; }
-      // particules multi-lettres exclues ; les lettres seules (A, B, D…) sont des sections valides
-      if (!section && /^0?[A-Za-z]{1,2}$/.test(j) && !/^(de|du|la|le|les|sur|en|et)$/i.test(j)) { section = j.toUpperCase(); continue; }
-      if (section !== null && numero === null && /^\d{1,4}$/.test(j)) { numero = j; continue; }
+    for (let k = 0; k < jetons.length; k++) {
+      const j = jetons[k], suivant = jetons[k + 1];
+      if (!insee && !section && /^\d{5}$/.test(j)) { insee = j; continue; }
+      // une section n'est reconnue que si son numéro la suit IMMÉDIATEMENT :
+      // « L ABERGEMENT » ou « SAINT B DUPONT » ne produisent plus de fausses sections
+      if (!section && /^0?[A-Za-z]{1,2}$/.test(j) && suivant !== undefined && /^\d{1,4}$/.test(suivant)) {
+        section = j.toUpperCase(); numero = suivant; k++; continue;
+      }
       motsCommune.push(j);
     }
     if (motsCommune.length) dernier = { insee: null, nomBrut: motsCommune.join(' ') };
@@ -614,7 +660,7 @@ async function importerTexte(texte){
     const rang = { insee: insee || (dernier && dernier.insee) || null,
                    nomBrut: (dernier && dernier.nomBrut) || null,
                    nom: '', section, numero, statut: 'attente', msg: 'résolution…' };
-    if (!rang.insee && !rang.nomBrut && secours) { rang.insee = secours.code; } // commune devinée / carte 1
+    if (!rang.insee && !rang.nomBrut && secours) { rang.insee = secours.code; rang.prefixe = secours.prefixe || null; } // commune devinée / carte 1
     if (!rang.insee && !rang.nomBrut) { rang.statut = 'erreur'; rang.msg = 'commune manquante (aucune détectée dans le texte, aucune en carte 1)'; }
     ajouterRang(rang);
     if (rang.statut === 'attente') resoudreCommune(rang);
@@ -638,7 +684,8 @@ async function importerModele1(texte){
     for (let i = 0; i < jetons.length - 1; i++) {
       // section stricte (1-2 majuscules, unités de surface exclues) suivie d'un n° de plan
       if (/^[A-Z]{1,2}$/.test(jetons[i]) && !/^(HA|CA|M2|A)$/.test(jetons[i]) && /^\d{1,4}$/.test(jetons[i + 1])) {
-        const rang = { insee, nomBrut: null, nom: nomDevine || '', section: jetons[i], numero: jetons[i + 1],
+        const rang = { insee, nomBrut: null, nom: nomDevine || '', prefixe: (devine && devine.prefixe) || (insee === inseeChoisi ? prefixeChoisi : null),
+                       section: jetons[i], numero: jetons[i + 1],
                        statut: insee ? 'attente' : 'erreur',
                        msg: insee ? 'vérification au cadastre…' : 'commune non identifiée dans l\'extrait — la sélectionner en carte 1 puis réimporter' };
         ajouterRang(rang);
@@ -668,10 +715,11 @@ async function resoudreCommune(r){
         : 'https://geo.api.gouv.fr/communes?nom=' + encodeURIComponent(r.nomBrut) + '&fields=code,nom&boost=population&limit=1';
       const rep = await (await fetch(url)).json();
       c = Array.isArray(rep) ? rep[0] : rep;
+      if ((!c || !c.code) && r.insee) c = await communeAncienne(r.insee); // commune fusionnée (leçon CERTIF)
       if (!c || !c.code) throw new Error('introuvable');
       cacheCommunes.set(cle, c);
     }
-    r.insee = c.code; r.nom = c.nom;
+    r.insee = c.code; r.nom = c.nom; if (c.prefixe) r.prefixe = c.prefixe;
     r.msg = 'vérification au cadastre…'; rendreListe();
     await verifierParcelle(r); return;
   } catch {
@@ -685,9 +733,10 @@ async function verifierParcelle(r){
   try {
     const sec = r.section.trim().toUpperCase().replace(/^0+(?=[A-Z])/,'').padStart(2,'0');
     const num = String(parseInt(r.numero,10)).padStart(4,'0');
-    const rep = await (await fetch('https://apicarto.ign.fr/api/cadastre/parcelle?code_insee=' + r.insee + '&section=' + sec + '&numero=' + num + '&_limit=1')).json();
+    const pab = r.prefixe && r.prefixe !== '000' ? '&com_abs=' + r.prefixe : ''; // ancienne commune : préfixe cadastral
+    const rep = await (await fetch('https://apicarto.ign.fr/api/cadastre/parcelle?code_insee=' + r.insee + '&section=' + sec + '&numero=' + num + pab + '&_limit=1')).json();
     if (rep.features && rep.features.length) { r.statut = 'ok'; r.msg = ''; }
-    else { r.statut = 'erreur'; r.msg = 'parcelle introuvable au cadastre (' + r.section + ' ' + parseInt(r.numero,10) + ') — vérifier section et numéro'; }
+    else { r.statut = 'erreur'; r.msg = 'parcelle introuvable au cadastre (' + r.section + ' ' + parseInt(r.numero,10) + (r.prefixe ? ', préfixe ' + r.prefixe : '') + ') — vérifier section et numéro'; }
   } catch {
     // service indisponible : on n'invalide pas la ligne, l'analyse tranchera
     r.statut = 'ok'; r.msg = '';
@@ -697,8 +746,8 @@ async function verifierParcelle(r){
 
 function ajouterRang(r){
   r.id = ++idListe;
-  // dédoublonnage sur insee+section+numero (les rangs en résolution passent le filtre)
-  if (r.insee && LISTE.some(x => x.insee === r.insee && x.section === r.section && String(parseInt(x.numero,10)) === String(parseInt(r.numero,10)))) return;
+  // dédoublonnage sur insee+préfixe+section+numero (les rangs en résolution passent le filtre)
+  if (r.insee && LISTE.some(x => x.insee === r.insee && (x.prefixe || '000') === (r.prefixe || '000') && x.section === r.section && String(parseInt(x.numero,10)) === String(parseInt(r.numero,10)))) return;
   LISTE.push(r);
   rendreListe();
 }
@@ -765,7 +814,7 @@ $('lancer').onclick = async () => {
   for (const p of parcelles) {
     n++;
     $('chargetxt').textContent = 'Analyse — ' + p.nom + ' ' + p.section + ' ' + p.numero + ' (' + n + '/' + parcelles.length + ') : Sitadel + emprises…';
-    const ref = { insee: p.insee, section: p.section, numero: p.numero };
+    const ref = { insee: p.insee, section: p.section, numero: p.numero, prefixe: p.prefixe || null };
     const [rA1, rA3] = await Promise.all([
       SITADEL.autorisationsPourParcelle(ref).catch(() => null),
       EMPRISES.emprisesPourParcelle(ref).catch(e => ({ erreur: e.message }))
@@ -814,6 +863,10 @@ function fiche(p, rA1, rA3){
 
   /* ===== AXE A1 ===== */
   corps += '<div class="soustitre"><span class="slash">/</span> Autorisations d\'urbanisme <span style="font-size:11px;color:var(--bleugris);font-weight:400">(Sitadel, depuis 2013)</span></div>';
+
+  if (p.prefixe && p.prefixe !== '000')
+    corps += '<div class="encadre enc-gris"><b>Parcelle d\'une ancienne commune (préfixe cadastral ' + ech(p.prefixe) + ').</b>' +
+      'Sitadel ne porte pas les préfixes de section : les autorisations listées peuvent concerner une parcelle homonyme d\'une autre partie de la commune actuelle — correspondance à confirmer sur pièces.</div>';
 
   let nbAutor = 0;
   if (!rA1) {
