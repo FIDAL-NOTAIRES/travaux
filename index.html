@@ -51,6 +51,20 @@
   .plist{display:flex;flex-direction:column;gap:8px;margin:8px 0}
   .prow{display:flex;gap:10px;align-items:center}
   .prow button.suppr{background:none;border:none;color:var(--carmin);font-size:18px;cursor:pointer;padding:2px 6px}
+
+  /* ---- import de liste + table de validation ---- */
+  #colle{width:100%;min-height:88px;border:1.5px dashed #b7c2cc;border-radius:8px;padding:10px 12px;font-size:13.5px;font-family:inherit;outline:none;resize:vertical;background:#fbfcfd}
+  #colle:focus{border-color:var(--canard)}
+  .zonedrop{border-color:var(--canard)!important;background:#eaf3f4!important}
+  .aide{font-size:11.5px;color:var(--bleugris);margin-top:4px}
+  .tliste{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:10px}
+  .tliste th{background:var(--nuit);color:#fff;text-align:left;padding:7px 10px;font-weight:600;font-size:12.5px}
+  .tliste td{padding:6px 10px;border-bottom:1px solid #eef1f4}
+  .tliste .st-ok{color:var(--canard);font-weight:700}
+  .tliste .st-attente{color:var(--bleugris)}
+  .tliste .st-erreur{color:var(--carmin);font-weight:700}
+  .tliste button.suppr{background:none;border:none;color:var(--carmin);font-size:16px;cursor:pointer}
+  .compteliste{font-size:13px;color:var(--bleugris);margin-top:6px}
   .actions{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
   button.principal{background:var(--canard);color:#fff;border:none;border-radius:7px;padding:12px 22px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;flex:1;min-width:220px}
   button.principal:hover{background:#2a6e75}
@@ -130,7 +144,7 @@
 
 <main>
   <section class="saisie">
-    <div class="titrecarte"><span class="badge">1</span><b>Références cadastrales</b></div>
+    <div class="titrecarte"><span class="badge">1</span><b>Ajouter une parcelle</b></div>
     <div class="ligne">
       <div class="champ champcommune" style="flex:1;min-width:280px">
         <label>Commune ou code postal</label>
@@ -138,11 +152,28 @@
         <div class="suggestions" id="suggestions"></div>
         <div id="communeInfo"></div>
       </div>
+      <div class="champ"><label>Section</label><input id="sec1" class="sec" placeholder="ex. ZH" maxlength="3"></div>
+      <div class="champ"><label>N° de parcelle</label><input id="num1" class="num" placeholder="ex. 44" maxlength="5"></div>
+      <div class="champ"><label>&nbsp;</label><button class="secondaire" id="ajouterListe">+ Ajouter à la liste</button></div>
     </div>
-    <div class="plist" id="plist"></div>
+  </section>
+
+  <section class="saisie" id="carteimport">
+    <div class="titrecarte"><span class="badge">2</span><b>Ou coller / glisser une liste</b></div>
+    <textarea id="colle" placeholder="Une parcelle par ligne — commune (ou code INSEE), section, numéro.&#10;Exemples :&#10;Châtillon-sur-Chalaronne ; ZH ; 44&#10;01093&#9;ZC&#9;27&#10;ZH 43   ← sans commune : reprend celle de la ligne précédente&#10;(copier-coller depuis Excel accepté ; fichier .txt ou .csv glissé accepté)"></textarea>
+    <div class="aide">Séparateurs acceptés : tabulation (Excel), point-virgule, virgule ou espaces. Une ligne sans commune hérite de la commune de la ligne précédente.</div>
     <div class="actions">
-      <button class="secondaire" id="ajouter">+ Ajouter une parcelle</button>
-      <button class="principal" id="lancer" disabled>Analyser la parcelle</button>
+      <button class="secondaire" id="importer">Importer la liste</button>
+    </div>
+  </section>
+
+  <section class="saisie" id="cartelist" style="display:none">
+    <div class="titrecarte"><span class="badge">3</span><b>Liste à analyser — validation avant lancement</b></div>
+    <table class="tliste" id="tliste"></table>
+    <div class="compteliste" id="compteliste"></div>
+    <div class="actions">
+      <button class="secondaire" id="vider">Tout effacer</button>
+      <button class="principal" id="lancer" disabled>Analyser la liste</button>
     </div>
   </section>
 
@@ -331,12 +362,14 @@ const EMPRISES = (() => {
   return { emprisesPourParcelle };
 })();
 
-/* ---------- 3. SAISIE ---------- */
+/* ---------- 3. SAISIE — liste multi-communes (accroche large → validation fine) ---------- */
 
-let inseeChoisi = null, nomCommune = '';
 const $ = id => document.getElementById(id);
+let inseeChoisi = null, nomCommune = '';
+const LISTE = []; // { insee, nom, section, numero, statut:'ok'|'attente'|'erreur', msg }
+let idListe = 0;
 
-/* Autocomplétion de commune — suggestions au fil de la frappe (convention des autres applis) */
+/* -- Autocomplétion de commune (carte 1) -- */
 let minuteur = null, suggestionsCourantes = [];
 
 function choisirCommune(c){
@@ -345,7 +378,6 @@ function choisirCommune(c){
   fermerSuggestions();
   $('communeInfo').innerHTML = '<span class="ok">✓ ' + c.nom + '</span> — INSEE ' + c.code +
     (c.codesPostaux && c.codesPostaux.length ? ' · ' + c.codesPostaux[0] : '');
-  majBouton();
 }
 function fermerSuggestions(){ $('suggestions').style.display = 'none'; $('suggestions').innerHTML = ''; suggestionsCourantes = []; }
 function afficherSuggestions(cs){
@@ -361,7 +393,7 @@ function afficherSuggestions(cs){
 }
 
 $('commune').addEventListener('input', () => {
-  clearTimeout(minuteur); inseeChoisi = null; majBouton();
+  clearTimeout(minuteur); inseeChoisi = null;
   $('communeInfo').textContent = '';
   const q = $('commune').value.trim();
   if (q.length < 2) { fermerSuggestions(); return; }
@@ -384,26 +416,122 @@ $('commune').addEventListener('keydown', e => {
 });
 $('commune').addEventListener('blur', () => setTimeout(fermerSuggestions, 200));
 
-function rangParcelle(){
-  const div = document.createElement('div');
-  div.className = 'prow';
-  div.innerHTML = '<div class="champ"><label>Section</label><input class="sec" placeholder="ex. ZH" maxlength="3"></div>' +
-    '<div class="champ"><label>N° de parcelle</label><input class="num" placeholder="ex. 44" maxlength="5"></div>' +
-    '<button class="suppr" title="Retirer">✕</button>';
-  div.querySelector('.suppr').onclick = () => { if ($('plist').children.length > 1) div.remove(); majBouton(); };
-  div.querySelectorAll('input').forEach(i => i.addEventListener('input', majBouton));
-  $('plist').appendChild(div);
-}
-$('ajouter').onclick = () => rangParcelle();
-rangParcelle();
+/* -- Carte 1 : ajout manuel à la liste -- */
+$('ajouterListe').onclick = () => {
+  const section = $('sec1').value.trim(), numero = $('num1').value.trim();
+  if (!inseeChoisi) { $('communeInfo').innerHTML = '<span class="ko">✗ choisir d\'abord une commune</span>'; return; }
+  if (!section || !/^\d+$/.test(numero)) return;
+  ajouterRang({ insee: inseeChoisi, nom: nomCommune, section: section.toUpperCase(), numero, statut: 'ok', msg: '' });
+  $('sec1').value = ''; $('num1').value = ''; $('sec1').focus();
+};
+$('num1').addEventListener('keydown', e => { if (e.key === 'Enter') $('ajouterListe').click(); });
 
-function lireParcelles(){
-  return [...$('plist').children].map(r => ({
-    section: r.querySelector('.sec').value.trim(),
-    numero : r.querySelector('.num').value.trim()
-  })).filter(p => p.section && p.numero && /^\d+$/.test(p.numero));
+/* -- Carte 2 : collage et glisser-déposer -- */
+$('importer').onclick = () => { importerTexte($('colle').value); $('colle').value = ''; };
+const zone = $('carteimport');
+zone.addEventListener('dragover', e => { e.preventDefault(); $('colle').classList.add('zonedrop'); });
+zone.addEventListener('dragleave', () => $('colle').classList.remove('zonedrop'));
+zone.addEventListener('drop', e => {
+  e.preventDefault(); $('colle').classList.remove('zonedrop');
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) { const rd = new FileReader(); rd.onload = () => importerTexte(String(rd.result)); rd.readAsText(f); }
+  else { const t = e.dataTransfer.getData('text/plain'); if (t) importerTexte(t); }
+});
+
+/* Analyse d'une ligne : jetons séparés par tab / ; / , / espaces.
+   - jeton de 5 chiffres → code INSEE
+   - jeton lettres (1-2, préfixe 0 admis) → section
+   - jeton 1-4 chiffres → numéro de parcelle
+   - le reste → nom de commune
+   Ligne sans commune → hérite de la précédente. */
+function importerTexte(texte){
+  if (!texte || !texte.trim()) return;
+  let dernier = null; // {insee?, nomBrut?}
+  for (const brute of texte.split(/\r?\n/)) {
+    const ligne = brute.trim();
+    if (!ligne) continue;
+    const jetons = ligne.split(/[\t;,]+|\s{1,}/).map(j => j.trim()).filter(Boolean);
+    let insee = null, section = null, numero = null; const motsCommune = [];
+    for (const j of jetons) {
+      if (!insee && /^\d{5}$/.test(j) && !(numero === null && section !== null)) { insee = j; continue; }
+      // particules multi-lettres exclues ; les lettres seules (A, B, D…) sont des sections valides
+      if (!section && /^0?[A-Za-z]{1,2}$/.test(j) && !/^(de|du|la|le|les|sur|en|et)$/i.test(j)) { section = j.toUpperCase(); continue; }
+      if (section !== null && numero === null && /^\d{1,4}$/.test(j)) { numero = j; continue; }
+      motsCommune.push(j);
+    }
+    if (motsCommune.length) dernier = { insee: null, nomBrut: motsCommune.join(' ') };
+    else if (insee) dernier = { insee, nomBrut: null };
+    if (!section || !numero) continue; // ligne sans parcelle exploitable
+    const rang = { insee: insee || (dernier && dernier.insee) || null,
+                   nomBrut: (dernier && dernier.nomBrut) || null,
+                   nom: '', section, numero, statut: 'attente', msg: 'résolution…' };
+    if (!rang.insee && !rang.nomBrut) { rang.statut = 'erreur'; rang.msg = 'commune manquante'; }
+    ajouterRang(rang);
+    if (rang.statut === 'attente') resoudreCommune(rang);
+  }
 }
-function majBouton(){ $('lancer').disabled = !(inseeChoisi && lireParcelles().length); }
+
+/* Résolution des communes importées — cache + appels geo.api.gouv.fr */
+const cacheCommunes = new Map();
+async function resoudreCommune(r){
+  const cle = r.insee ? 'i:' + r.insee : 'n:' + r.nomBrut.toLowerCase();
+  try {
+    let c = cacheCommunes.get(cle);
+    if (!c) {
+      const url = r.insee
+        ? 'https://geo.api.gouv.fr/communes/' + r.insee + '?fields=code,nom'
+        : 'https://geo.api.gouv.fr/communes?nom=' + encodeURIComponent(r.nomBrut) + '&fields=code,nom&boost=population&limit=1';
+      const rep = await (await fetch(url)).json();
+      c = Array.isArray(rep) ? rep[0] : rep;
+      if (!c || !c.code) throw new Error('introuvable');
+      cacheCommunes.set(cle, c);
+    }
+    r.insee = c.code; r.nom = c.nom; r.statut = 'ok'; r.msg = '';
+  } catch {
+    r.statut = 'erreur'; r.msg = 'commune non résolue : « ' + (r.nomBrut || r.insee) + ' »';
+  }
+  rendreListe();
+}
+
+function ajouterRang(r){
+  r.id = ++idListe;
+  // dédoublonnage sur insee+section+numero (les rangs en résolution passent le filtre)
+  if (r.insee && LISTE.some(x => x.insee === r.insee && x.section === r.section && String(parseInt(x.numero,10)) === String(parseInt(r.numero,10)))) return;
+  LISTE.push(r);
+  rendreListe();
+}
+
+function rendreListe(){
+  const t = $('tliste');
+  $('cartelist').style.display = LISTE.length ? '' : 'none';
+  if (!LISTE.length) { t.innerHTML = ''; majBouton(); return; }
+  t.innerHTML = '<tr><th>Commune</th><th>INSEE</th><th>Section</th><th>N°</th><th>Statut</th><th></th></tr>' +
+    LISTE.map(r => '<tr>' +
+      '<td>' + ech(r.nom || r.nomBrut || '—') + '</td>' +
+      '<td>' + ech(r.insee || '—') + '</td>' +
+      '<td>' + ech(r.section) + '</td>' +
+      '<td>' + ech(String(parseInt(r.numero,10))) + '</td>' +
+      '<td class="st-' + r.statut + '">' + (r.statut === 'ok' ? '✓' : r.statut === 'attente' ? '⏳ ' + ech(r.msg) : '✗ ' + ech(r.msg)) + '</td>' +
+      '<td><button class="suppr" data-id="' + r.id + '" title="Retirer">✕</button></td></tr>').join('');
+  t.querySelectorAll('button.suppr').forEach(b => b.onclick = () => {
+    const i = LISTE.findIndex(x => x.id === +b.dataset.id);
+    if (i >= 0) LISTE.splice(i, 1);
+    rendreListe();
+  });
+  const oks = LISTE.filter(r => r.statut === 'ok').length;
+  const errs = LISTE.filter(r => r.statut === 'erreur').length;
+  $('compteliste').textContent = LISTE.length + ' parcelle(s) — ' + oks + ' prête(s)' +
+    (errs ? ', ' + errs + ' en erreur (corriger ou retirer)' : '') +
+    (LISTE.length - oks - errs ? ', ' + (LISTE.length - oks - errs) + ' en résolution' : '');
+  majBouton();
+}
+
+$('vider').onclick = () => { LISTE.length = 0; rendreListe(); };
+function majBouton(){
+  const oks = LISTE.filter(r => r.statut === 'ok').length;
+  $('lancer').disabled = !oks;
+  $('lancer').textContent = oks ? 'Analyser la liste (' + oks + ' parcelle' + (oks > 1 ? 's' : '') + ')' : 'Analyser la liste';
+}
 
 /* ---------- 4. ANALYSE ET FICHE ---------- */
 
@@ -414,7 +542,7 @@ const COUL = { PC:'var(--nuit)', DP:'var(--canard)', PA:'var(--bleugris)', PD:'v
 let numCarte = 0; const cartesEnAttente = [];
 
 $('lancer').onclick = async () => {
-  const parcelles = lireParcelles();
+  const parcelles = LISTE.filter(r => r.statut === 'ok');
   $('resultats').innerHTML = '';
   cartesEnAttente.length = 0;
   $('chargement').style.display = 'block';
@@ -422,8 +550,8 @@ $('lancer').onclick = async () => {
   let n = 0;
   for (const p of parcelles) {
     n++;
-    $('chargetxt').textContent = 'Analyse — parcelle ' + p.section.toUpperCase() + ' ' + p.numero + ' (' + n + '/' + parcelles.length + ') : Sitadel + emprises…';
-    const ref = { insee: inseeChoisi, section: p.section, numero: p.numero };
+    $('chargetxt').textContent = 'Analyse — ' + p.nom + ' ' + p.section + ' ' + p.numero + ' (' + n + '/' + parcelles.length + ') : Sitadel + emprises…';
+    const ref = { insee: p.insee, section: p.section, numero: p.numero };
     const [rA1, rA3] = await Promise.all([
       SITADEL.autorisationsPourParcelle(ref).catch(() => null),
       EMPRISES.emprisesPourParcelle(ref).catch(e => ({ erreur: e.message }))
@@ -437,7 +565,7 @@ $('lancer').onclick = async () => {
 };
 
 function fiche(p, rA1, rA3){
-  const titre = ech(nomCommune) + ' — ' + ech(p.section.toUpperCase()) + ' ' + ech(String(parseInt(p.numero,10)));
+  const titre = ech(p.nom) + ' — ' + ech(p.section.toUpperCase()) + ' ' + ech(String(parseInt(p.numero,10)));
   let corps = '';
 
   /* ===== AXE A1 ===== */
