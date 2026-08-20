@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TRAVAUX — Autorisations d'urbanisme par parcelle</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+  /* ============ CHARTE FIDAL v2.2 ============ */
+  :root{
+    --nuit:#0F2238; --canard:#33838B; --cyan:#6DD5DC; --orange:#FF982D;
+    --bleugris:#657D96; --amande:#82AA98; --ocre:#E3CC7A; --jaune:#FFE764;
+    --carmin:#A01040; --grisclair:#F4F5F7; --noir:#1A1A1A;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:"Segoe UI",system-ui,-apple-system,sans-serif;color:var(--noir);background:var(--grisclair);font-size:15px;line-height:1.45}
+  .serif{font-family:"Source Serif 4",Georgia,serif}
+
+  header{background:var(--nuit);color:#fff;padding:22px 28px 18px}
+  header .slash{color:var(--ocre);font-weight:700}
+  header h1{font-family:"Source Serif 4",Georgia,serif;font-weight:600;font-size:30px;letter-spacing:-.5px}
+  header p{color:var(--cyan);font-size:14px;margin-top:4px}
+  header .peri{color:var(--bleugris);font-size:12px;margin-top:6px;max-width:900px}
+
+  main{max-width:1100px;margin:0 auto;padding:24px 20px 60px}
+
+  /* ---- carte de saisie (convention URBA : badge canard, bord or) ---- */
+  .saisie{background:#fff;border-radius:10px;border-left:5px solid var(--ocre);box-shadow:0 1px 4px rgba(15,34,56,.10);padding:18px 20px;margin-bottom:22px}
+  .saisie .titrecarte{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .badge{background:var(--canard);color:#fff;border-radius:50%;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex:none}
+  .titrecarte b{font-size:16px;color:var(--nuit)}
+  .ligne{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px}
+  .champ{display:flex;flex-direction:column;gap:4px}
+  .champ label{font-size:12px;color:var(--bleugris);font-weight:600}
+  .champ input{border:1.5px solid #cfd6de;border-radius:6px;padding:9px 10px;font-size:15px;font-family:inherit;outline:none}
+  .champ input:focus{border-color:var(--canard)}
+  #commune{width:320px} .sec{width:110px} .num{width:120px}
+  .ok{color:var(--amande);font-weight:700;font-size:13px}
+  .ko{color:var(--carmin);font-weight:700;font-size:13px}
+  #communeInfo{font-size:13px;min-height:18px;margin-top:2px}
+  .plist{display:flex;flex-direction:column;gap:8px;margin:8px 0}
+  .prow{display:flex;gap:10px;align-items:center}
+  .prow button.suppr{background:none;border:none;color:var(--carmin);font-size:18px;cursor:pointer;padding:2px 6px}
+  .actions{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+  button.principal{background:var(--canard);color:#fff;border:none;border-radius:7px;padding:12px 22px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit;flex:1;min-width:220px}
+  button.principal:hover{background:#2a6e75}
+  button.principal:disabled{background:#a9bcc0;cursor:not-allowed}
+  button.secondaire{background:#fff;color:var(--canard);border:1.5px solid var(--canard);border-radius:7px;padding:11px 16px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
+  button.secondaire:hover{background:#eef5f6}
+
+  /* ---- fiche résultats ---- */
+  .fiche{background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(15,34,56,.10);margin-bottom:20px;overflow:hidden}
+  .fiche .entete{background:var(--nuit);color:#fff;padding:13px 18px;display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px}
+  .fiche .entete .serif{font-size:19px}
+  .fiche .entete .compte{font-size:13px;color:var(--cyan)}
+  .fiche .corps{padding:16px 18px}
+
+  .autor{border:1px solid #dde3e9;border-left-width:5px;border-radius:8px;padding:12px 14px;margin-bottom:12px}
+  .autor .l1{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+  .tag{color:#fff;font-weight:700;font-size:12px;border-radius:5px;padding:3px 9px;letter-spacing:.4px}
+  .numero{font-weight:700;color:var(--nuit);font-size:15px}
+  .etat{font-size:12px;font-weight:700;border-radius:5px;padding:3px 9px}
+  .etat.e2{background:var(--cyan);color:var(--nuit)}
+  .etat.e5{background:var(--ocre);color:var(--nuit)}
+  .etat.e6{background:var(--amande);color:var(--nuit)}
+  .etat.e4{background:var(--carmin);color:#fff}
+  .via{margin-left:auto;font-size:11px;color:var(--bleugris)}
+  .grille{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:6px 16px;font-size:13.5px}
+  .grille .lib{color:var(--bleugris)}
+  .grille b{color:var(--nuit)}
+  .alerte-daact{color:var(--orange);font-weight:700}
+  .puces{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap}
+  .puce{background:var(--grisclair);border:1px solid #dde3e9;border-radius:20px;font-size:12px;padding:2px 10px;color:var(--nuit)}
+  .demandeur{margin-top:8px;font-size:13px;color:var(--nuit)}
+  .demandeur a{color:var(--canard);text-decoration:none;font-weight:600}
+
+  /* encadrés de règle / d'alerte */
+  .encadre{border-radius:8px;padding:12px 15px;font-size:13.5px;margin-bottom:12px}
+  .encadre b{display:block;margin-bottom:3px}
+  .enc-orange{background:#fff4e7;border-left:4px solid var(--orange);color:var(--nuit)}
+  .enc-carmin{background:#f8e9ee;border-left:4px solid var(--carmin);color:var(--nuit)}
+  .enc-gris{background:var(--grisclair);border-left:4px solid var(--bleugris);color:var(--nuit)}
+
+  .chargement{display:none;background:#fff;border-radius:10px;padding:18px;text-align:center;color:var(--canard);font-weight:600;margin-bottom:20px}
+  .spin{display:inline-block;width:16px;height:16px;border:3px solid var(--canard);border-top-color:transparent;border-radius:50%;animation:r 0.8s linear infinite;vertical-align:-3px;margin-right:8px}
+  @keyframes r{to{transform:rotate(360deg)}}
+
+  footer{max-width:1100px;margin:0 auto;padding:0 20px 40px;font-size:11.5px;color:var(--bleugris);line-height:1.6}
+  footer .filet{border-top:1px solid #d5dbe2;padding-top:12px}
+  @media print{.saisie,header .peri,.actions{display:none}body{background:#fff}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="slash">/</span> <span class="serif">Travaux</span></h1>
+  <p>Autorisations d'urbanisme par parcelle — inventaire du déclaré (axe A1)</p>
+  <div class="peri">Source : base Sitadel (SDES), republication Data Fair — permis de construire, d'aménager, de démolir et déclarations préalables créant un logement ou de la surface, <b>depuis 2013, autorisations accordées uniquement</b>.</div>
+</header>
+
+<main>
+  <!-- ================ SAISIE ================ -->
+  <section class="saisie">
+    <div class="titrecarte"><span class="badge">1</span><b>Références cadastrales</b></div>
+    <div class="ligne">
+      <div class="champ" style="flex:1;min-width:280px">
+        <label>Commune ou code postal</label>
+        <input id="commune" placeholder="ex. Châtillon-sur-Chalaronne ou 01400" autocomplete="off">
+        <div id="communeInfo"></div>
+      </div>
+    </div>
+    <div class="plist" id="plist"></div>
+    <div class="actions">
+      <button class="secondaire" id="ajouter">+ Ajouter une parcelle</button>
+      <button class="principal" id="lancer" disabled>Rechercher les autorisations</button>
+    </div>
+  </section>
+
+  <div class="chargement" id="chargement"><span class="spin"></span><span id="chargetxt">Interrogation de Sitadel…</span></div>
+  <div id="resultats"></div>
+</main>
+
+<footer>
+  <div class="filet">
+    <b>Limites du périmètre Sitadel</b> — ce que cette fiche ne peut pas voir :
+    autorisations antérieures à 2013 · déclarations préalables ne créant ni logement ni surface (piscines, clôtures, ravalements, abris) ·
+    demandes refusées ou en cours d'instruction · au-delà de trois parcelles par autorisation.
+    <b>Une absence de ligne est une question à poser en mairie, jamais une conclusion.</b>
+    Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
+    Données : SDES / data.gouv.fr, Licence Ouverte, republication opendata.koumoul.com — mise à jour mensuelle.
+  </div>
+</footer>
+
+<script>
+/* =====================================================================
+   TRAVAUX v1 — mémo de cadrage v1.3 du 20/08/2026
+   Règles structurantes (§ A1.1) :
+   - MODULE D'ACCÈS UNIQUE : tout appel Sitadel passe par
+     autorisationsPourParcelle(). Aucun appel Koumoul ailleurs.
+   - CONTRAT DE SORTIE NEUTRE : le module renvoie le format TRAVAUX,
+     jamais le JSON Data Fair brut.
+   - REQUÊTE COMPLÈTE : les 3 positions de parcelle sont interrogées.
+   - ÉCHEC EXPLICITE : « Sitadel indisponible — parcelle à retraiter ».
+   ===================================================================== */
+
+'use strict';
+
+/* ---------- 1. LE MODULE SOURCE (seul endroit qui connaît Koumoul) ---------- */
+
+const SITADEL = (() => {
+  const BASE = 'https://opendata.koumoul.com/data-fair/api/v1/datasets/';
+  // Jeux et correspondance des colonnes propres à chaque jeu
+  const JEUX = [
+    { id:'sitadel-logements', type:null, num:'NUM_DAU', etat:'ETAT_DAU', famille:'Logements' },
+    { id:'sitadel-locaux',    type:null, num:'NUM_DAU', etat:'ETAT_DAU', famille:'Locaux' },
+    { id:'sitadel-pa',        type:'PA', num:'NUM_PA',  etat:'ETAT_PA',  famille:'Aménagement' },
+    { id:'sitadel-pd',        type:'PD', num:'NUM_PD',  etat:'ETAT_PD',  famille:'Démolition' }
+  ];
+  const ETATS = {2:'Autorisé',4:'Annulé',5:'Commencé',6:'Terminé'};
+  const NATURES = {1:'Nouvelle construction',2:'Transformation sans extension',3:'Transformation avec extension',4:'Transformation avec diminution',5:'Extension sans transformation',6:'Diminution sans transformation'};
+
+  // File d'attente à débit limité (3 requêtes simultanées) — patron URBA/MARTEAU
+  let actives = 0; const attente = [];
+  function passer(){ if (actives >= 3 || !attente.length) return;
+    actives++; const t = attente.shift();
+    t.fn().then(t.res, t.rej).finally(() => { actives--; passer(); }); }
+  const enFile = fn => new Promise((res, rej) => { attente.push({fn,res,rej}); passer(); });
+
+  async function requete(jeu, filtres){
+    const p = new URLSearchParams({ size:'100' });
+    for (const [k,v] of Object.entries(filtres)) p.set(k, v);
+    const r = await fetch(BASE + jeu.id + '/lines?' + p.toString());
+    if (!r.ok) throw new Error(jeu.id + ' HTTP ' + r.status);
+    return (await r.json()).results || [];
+  }
+
+  function normaliser(brut, jeu, via){
+    const d = x => x || null;
+    return {
+      numero  : brut[jeu.num] || '?',
+      type    : jeu.type || brut.TYPE_DAU || '?',
+      famille : jeu.famille,
+      etat    : ETATS[brut[jeu.etat]] || '?',
+      etatCode: String(brut[jeu.etat] || ''),
+      dates   : { depot: d(brut.DR_DEPOT), autorisation: d(brut.DATE_REELLE_AUTORISATION),
+                  chantier: d(brut.DATE_REELLE_DOC), daact: d(brut.DATE_REELLE_DAACT) },
+      anneeDepot : brut.AN_DEPOT || null,
+      nature  : NATURES[brut.NATURE_PROJET_COMPLETEE] || NATURES[brut.NATURE_PROJET_DECLAREE] || null,
+      surfaces: { habCreee: brut.SURF_HAB_CREEE ?? null, locCreee: brut.SURF_LOC_CREEE ?? null,
+                  habAvant: brut.SURF_HAB_AVANT ?? null, locAvant: brut.SURF_LOC_AVANT ?? null },
+      terrain : brut.SUPERFICIE_TERRAIN ?? null,
+      indicateurs : ['I_EXTENSION','I_SURELEVATION','I_PISCINE','I_GARAGE','I_VERANDA','I_ABRI_JARDIN']
+        .filter(k => brut[k] === true)
+        .map(k => ({I_EXTENSION:'Extension',I_SURELEVATION:'Surélévation',I_PISCINE:'Piscine',I_GARAGE:'Garage',I_VERANDA:'Véranda',I_ABRI_JARDIN:'Abri de jardin'})[k]),
+      demandeur : { nom: d(brut.DENOM_DEM), siren: d(brut.SIREN_DEM) },
+      parcelles : [1,2,3].map(i => ({ section: brut['SEC_CADASTRE'+i], numero: brut['NUM_CADASTRE'+i] }))
+                         .filter(x => x.section || x.numero),
+      confiance : d(brut.parcel_confidence),
+      via, jeu: jeu.id, logements: brut.NB_LGT_TOT_CREES ?? null
+    };
+  }
+
+  /* CONTRAT PUBLIC : autorisationsPourParcelle({insee, section, numero})
+     → { autorisations:[…format neutre…], indisponibles:[jeux en échec] } */
+  async function autorisationsPourParcelle({insee, section, numero}) {
+    const sec = section.trim().toUpperCase().replace(/^0+(?=[A-Z])/,'');
+    const num = String(parseInt(numero, 10));
+    const taches = [];
+    for (const jeu of JEUX)
+      for (const pos of [1,2,3])
+        taches.push(enFile(() => requete(jeu, {
+          COMM_eq: insee,
+          ['SEC_CADASTRE'+pos+'_eq']: sec,
+          ['NUM_CADASTRE'+pos+'_eq']: num
+        })).then(lignes => ({jeu, pos, lignes}), err => ({jeu, pos, erreur:err})));
+
+    const retours = await Promise.all(taches);
+    const vues = new Map(); const indisponibles = new Set();
+    for (const r of retours) {
+      if (r.erreur) { indisponibles.add(r.jeu.famille); continue; }
+      for (const brut of r.lignes) {
+        const cle = r.jeu.id + '|' + (brut[r.jeu.num] || JSON.stringify(brut).slice(0,80));
+        if (!vues.has(cle)) vues.set(cle, normaliser(brut, r.jeu, 'parcelle en position ' + r.pos));
+      }
+    }
+    const autorisations = [...vues.values()].sort((a,b) =>
+      (b.dates.autorisation||'').localeCompare(a.dates.autorisation||''));
+    return { autorisations, indisponibles: [...indisponibles] };
+  }
+
+  return { autorisationsPourParcelle };
+})();
+
+/* ---------- 2. SAISIE (conventions URBA : INSEE live, multi-parcelles) ---------- */
+
+let inseeChoisi = null, nomCommune = '';
+const $ = id => document.getElementById(id);
+
+let minuteur = null;
+$('commune').addEventListener('input', () => {
+  clearTimeout(minuteur); inseeChoisi = null; majBouton();
+  const q = $('commune').value.trim();
+  if (q.length < 2) { $('communeInfo').textContent = ''; return; }
+  minuteur = setTimeout(async () => {
+    try {
+      const parCP = /^\d{5}$/.test(q);
+      const url = 'https://geo.api.gouv.fr/communes?' +
+        (parCP ? 'codePostal=' + q : 'nom=' + encodeURIComponent(q)) +
+        '&fields=code,nom,codesPostaux&limit=5';
+      const cs = await (await fetch(url)).json();
+      if (!cs.length) { $('communeInfo').innerHTML = '<span class="ko">✗ commune inconnue</span>'; return; }
+      const c = cs[0];
+      inseeChoisi = c.code; nomCommune = c.nom;
+      $('communeInfo').innerHTML = '<span class="ok">✓ ' + c.nom + '</span> — INSEE ' + c.code +
+        (cs.length > 1 ? ' <span style="color:var(--bleugris)">(' + (cs.length-1) + ' autre(s) : préciser si besoin)</span>' : '');
+      majBouton();
+    } catch { $('communeInfo').innerHTML = '<span class="ko">✗ service commune indisponible</span>'; }
+  }, 350);
+});
+
+function rangParcelle(){
+  const div = document.createElement('div');
+  div.className = 'prow';
+  div.innerHTML = '<div class="champ"><label>Section</label><input class="sec" placeholder="ex. ZH" maxlength="3"></div>' +
+    '<div class="champ"><label>N° de parcelle</label><input class="num" placeholder="ex. 44" maxlength="5"></div>' +
+    '<button class="suppr" title="Retirer">✕</button>';
+  div.querySelector('.suppr').onclick = () => { if ($('plist').children.length > 1) div.remove(); majBouton(); };
+  div.querySelectorAll('input').forEach(i => i.addEventListener('input', majBouton));
+  $('plist').appendChild(div);
+}
+$('ajouter').onclick = () => rangParcelle();
+rangParcelle();
+
+function lireParcelles(){
+  return [...$('plist').children].map(r => ({
+    section: r.querySelector('.sec').value.trim(),
+    numero : r.querySelector('.num').value.trim()
+  })).filter(p => p.section && p.numero && /^\d+$/.test(p.numero));
+}
+function majBouton(){ $('lancer').disabled = !(inseeChoisi && lireParcelles().length); }
+
+/* ---------- 3. RECHERCHE ET FICHE ---------- */
+
+const ech = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fdate = s => { if (!s) return null; const [a,m,j] = s.split('-'); return j && m ? j+'/'+m+'/'+a : s; };
+const COUL = { PC:'var(--nuit)', DP:'var(--canard)', PA:'var(--bleugris)', PD:'var(--carmin)' };
+
+$('lancer').onclick = async () => {
+  const parcelles = lireParcelles();
+  $('resultats').innerHTML = '';
+  $('chargement').style.display = 'block';
+  $('lancer').disabled = true;
+  let n = 0;
+  for (const p of parcelles) {
+    n++;
+    $('chargetxt').textContent = 'Interrogation de Sitadel — parcelle ' + p.section.toUpperCase() + ' ' + p.numero + ' (' + n + '/' + parcelles.length + ')…';
+    let bloc;
+    try {
+      const r = await SITADEL.autorisationsPourParcelle({ insee: inseeChoisi, section: p.section, numero: p.numero });
+      bloc = fiche(p, r);
+    } catch (e) {
+      bloc = fiche(p, null); // échec total
+    }
+    $('resultats').insertAdjacentHTML('beforeend', bloc);
+  }
+  $('chargement').style.display = 'none';
+  majBouton();
+};
+
+function fiche(p, r){
+  const titre = ech(nomCommune) + ' — ' + ech(p.section.toUpperCase()) + ' ' + ech(String(parseInt(p.numero,10)));
+  let corps = '';
+
+  if (!r) { // règle MARTEAU § 2 : échec explicite, jamais silencieux
+    corps = '<div class="encadre enc-carmin"><b>Sitadel indisponible — parcelle à retraiter.</b>' +
+      'La source n\'a pas répondu. Aucune conclusion ne peut être tirée : relancer la recherche avant toute analyse.</div>';
+    return gabarit(titre, '', corps);
+  }
+
+  if (r.indisponibles.length)
+    corps += '<div class="encadre enc-carmin"><b>Réponse incomplète — parcelle à retraiter.</b>' +
+      'Jeux non interrogés : ' + r.indisponibles.map(ech).join(', ') + '. Les résultats ci-dessous ne couvrent pas tout le périmètre Sitadel.</div>';
+
+  if (!r.autorisations.length) {
+    corps += '<div class="encadre enc-orange"><b>Aucune autorisation trouvée dans Sitadel.</b>' +
+      'Cela signifie seulement : pas de PC, PA, PD ni de DP créant un logement ou de la surface, <i>accordé depuis 2013</i>, rattaché à cette parcelle. ' +
+      'Les DP mineures (piscine, clôture, abri, ravalement), le pré-2013 et les refus sont hors du champ de la source. ' +
+      '<b>→ Pièce à obtenir : relevé des autorisations auprès de la mairie.</b></div>';
+  } else {
+    corps += r.autorisations.map(carte).join('');
+    corps += '<div class="encadre enc-gris"><b>Portée de l\'inventaire</b>' +
+      'Ces lignes sont des faits acquis (source SDES). Elles ne prouvent ni la conformité de l\'exécution ni l\'absence d\'autres travaux : ' +
+      'le pré-2013 et les DP mineures restent à confirmer en mairie, et la conformité s\'apprécie sur pièces (DAACT, PV de réception).</div>';
+  }
+  const compte = r.autorisations.length + ' autorisation' + (r.autorisations.length > 1 ? 's' : '') + ' trouvée' + (r.autorisations.length > 1 ? 's' : '');
+  return gabarit(titre, compte, corps);
+}
+
+function gabarit(titre, compte, corps){
+  return '<section class="fiche"><div class="entete"><span class="serif">' + titre + '</span>' +
+    (compte ? '<span class="compte">' + compte + '</span>' : '') + '</div><div class="corps">' + corps + '</div></section>';
+}
+
+function carte(a){
+  const c = COUL[a.type] || 'var(--bleugris)';
+  const lg = [];
+  if (a.dates.depot)        lg.push(['Dépôt', fdate(a.dates.depot)]);
+  else if (a.anneeDepot)    lg.push(['Année de dépôt', a.anneeDepot]);
+  if (a.dates.autorisation) lg.push(['Autorisation', fdate(a.dates.autorisation)]);
+  if (a.dates.chantier)     lg.push(['Ouverture de chantier', fdate(a.dates.chantier)]);
+  lg.push(['DAACT', a.dates.daact ? fdate(a.dates.daact) : '<span class="alerte-daact">non renseignée dans Sitadel</span>']);
+  if (a.nature)                     lg.push(['Nature', a.nature]);
+  if (a.surfaces.habCreee)          lg.push(['Surface habitation créée', a.surfaces.habCreee + ' m²']);
+  if (a.surfaces.locCreee)          lg.push(['Surface locaux créée', a.surfaces.locCreee + ' m²']);
+  if (a.logements)                  lg.push(['Logements créés', a.logements]);
+  if (a.terrain)                    lg.push(['Superficie du terrain', a.terrain + ' m²']);
+  if (a.parcelles.length > 1)       lg.push(['Parcelles de l\'autorisation', a.parcelles.map(x => ech((x.section||'?') + ' ' + (x.numero||'?'))).join(', ')]);
+  if (a.confiance && a.confiance !== '100 %') lg.push(['Confiance du rapprochement', ech(a.confiance) + ' — à vérifier']);
+
+  let dem = '';
+  if (a.demandeur.nom || a.demandeur.siren)
+    dem = '<div class="demandeur">Demandeur : <b>' + ech(a.demandeur.nom || '—') + '</b>' +
+      (a.demandeur.siren ? ' — SIREN <a href="https://www.pappers.fr/recherche?q=' + ech(a.demandeur.siren) + '" target="_blank" rel="noopener">' + ech(a.demandeur.siren) + '</a>' : '') + '</div>';
+
+  return '<div class="autor" style="border-left-color:' + c + '">' +
+    '<div class="l1"><span class="tag" style="background:' + c + '">' + ech(a.type) + '</span>' +
+    '<span class="numero">' + ech(a.numero) + '</span>' +
+    '<span class="etat e' + ech(a.etatCode) + '">' + ech(a.etat) + '</span>' +
+    '<span class="via">' + ech(a.famille) + ' · ' + ech(a.via) + '</span></div>' +
+    '<div class="grille">' + lg.map(x => '<div><span class="lib">' + x[0] + ' : </span><b>' + x[1] + '</b></div>').join('') + '</div>' +
+    (a.indicateurs.length ? '<div class="puces">' + a.indicateurs.map(i => '<span class="puce">' + ech(i) + '</span>').join('') + '</div>' : '') +
+    dem + '</div>';
+}
+</script>
+</body>
+</html>
