@@ -190,6 +190,9 @@
     </div>
   </section>
 
+  <!-- atelier hors écran : cartes carrées dédiées aux exports, cadrées sur la parcelle -->
+  <div id="atelier" style="position:fixed;left:-10050px;top:0;width:640px;height:640px;z-index:-1"></div>
+
   <div class="chargement" id="chargement"><span class="spin"></span><span id="chargetxt">Analyse en cours…</span></div>
   <div class="exportsbar" id="exportsbar">
     <button class="bword" id="expWord">Fiche Word</button>
@@ -783,37 +786,40 @@ function telecharger(blob, nom){
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
 }
 
-// Capture d'une carte Leaflet (contrôles masqués pendant la capture, comme URBA)
-async function captureCarte(id){
-  const el = document.getElementById(id);
-  if (!el || typeof html2canvas === 'undefined') return null;
-  const ctrl = el.querySelector('.leaflet-control-container');
-  if (ctrl) ctrl.style.display = 'none';
+/* Cartes d'export : générées HORS ÉCRAN, carrées (640×640), cadrées serré sur la
+   parcelle — indépendantes de la taille et du cadrage de la carte affichée. */
+const FONDS_EXPORT = [
+  { nom: 'plan',  couche: 'GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2',   format: 'image/png',  libelle: 'Plan IGN / cadastre' },
+  { nom: 'ortho', couche: 'ORTHOIMAGERY.ORTHOPHOTOS',            format: 'image/jpeg', libelle: 'Photo aérienne actuelle' },
+  { nom: 'histo', couche: 'ORTHOIMAGERY.ORTHOPHOTOS.1950-1965',  format: 'image/png',  libelle: 'Photo aérienne 1950-1965' }
+];
+
+async function carteExportImage(parcelle, fond){
+  const atelier = document.getElementById('atelier');
+  atelier.innerHTML = '<div id="atelier-carte" style="width:640px;height:640px"></div>';
+  const couche = coucheWMTS(fond.couche, fond.format);
+  const map = L.map('atelier-carte', { layers: [couche], zoomControl: false, attributionControl: false });
+  const contour = L.geoJSON(parcelle, { style: { color: '#0F2238', weight: 4, fillColor: '#6DD5DC', fillOpacity: 0.10 } }).addTo(map);
+  map.fitBounds(contour.getBounds().pad(0.35), { maxZoom: 18 });
+  // attendre le chargement des tuiles (filet à 3 s pour les zones lentes)
+  await new Promise(res => { let fini = false;
+    const ok = () => { if (!fini) { fini = true; setTimeout(res, 300); } };
+    couche.once('load', ok); setTimeout(ok, 3000); });
+  let img = null;
   try {
-    const cv = await html2canvas(el, { useCORS: true, scale: 1.5, logging: false });
-    return { data: cv.toDataURL('image/png'), w: cv.width, h: cv.height };
-  } catch(e) { return null; }
-  finally { if (ctrl) ctrl.style.display = ''; }
+    const cv = await html2canvas(document.getElementById('atelier-carte'), { useCORS: true, scale: 1.5, logging: false });
+    img = { data: cv.toDataURL('image/png'), w: cv.width, h: cv.height };
+  } catch(e) { /* tuiles non capturables : vignette absente, export poursuivi */ }
+  map.remove(); atelier.innerHTML = '';
+  return img;
 }
 
-// Capture des TROIS fonds d'une carte : plan cadastral, photo actuelle, photo 1950-65
-const FONDS_EXPORT = [
-  { nom: 'plan',  libelle: 'Plan IGN / cadastre' },
-  { nom: 'ortho', libelle: 'Photo aérienne actuelle' },
-  { nom: 'histo', libelle: 'Photo aérienne 1950-1965' }
-];
-async function captureTroisFonds(id, progres){
-  const c = CARTES[id];
-  if (!c) return [];
-  const initial = c.getFond();
+async function captureTroisFonds(parcelle){
   const images = [];
   for (const f of FONDS_EXPORT) {
-    if (progres) progres(f.libelle);
-    await c.setFond(f.nom);
-    const img = await captureCarte(id);
+    const img = await carteExportImage(parcelle, f);
     if (img) images.push({ libelle: f.libelle, img });
   }
-  await c.setFond(initial);
   return images;
 }
 
@@ -892,22 +898,22 @@ $('expPdf').onclick = async () => {
       pdf.setFont('helvetica','normal'); pdf.setFontSize(8); pdf.setTextColor(109,213,220);
       pdf.text('TRAVAUX — ' + dateJour(), 198, 13, { align: 'right' });
 
-      // ------- colonne gauche : LES TROIS CARTES empilées (plan / photo actuelle / photo 1950-65) -------
-      if (a.idCarte) {
+      // ------- colonne gauche : LES TROIS CARTES carrées (plan / photo actuelle / photo 1950-65) -------
+      if (a.rA3 && !a.rA3.erreur && a.rA3.parcelle) {
         btn.textContent = 'Génération… cartes ' + (i + 1) + '/' + ANALYSES.length;
-        const images = await captureTroisFonds(a.idCarte);
+        const images = await captureTroisFonds(a.rA3.parcelle);
         let gy = 28;
         for (const im of images) {
-          const iw = GW, ih = Math.min(iw * im.img.h / im.img.w, 72);
-          if (gy + ih + 8 > 283) break;
+          const iw = GW, ih = iw * im.img.h / im.img.w; // carré : ≈ 56 × 56 mm
+          if (gy + ih + 9 > 284) break;
           pdf.addImage(im.img.data, 'PNG', GX, gy, iw, ih);
           pdf.setDrawColor(...GRIS); pdf.rect(GX, gy, iw, ih);
           pdf.setFont('helvetica','normal'); pdf.setFontSize(7); pdf.setTextColor(...NUIT);
           pdf.text(pdfTxt(im.libelle), GX, gy + ih + 3.5);
-          gy += ih + 8;
+          gy += ih + 9;
         }
         pdf.setFontSize(6.5); pdf.setTextColor(...GRIS);
-        pdf.text('Contour de la parcelle en bleu nuit', GX, Math.min(gy, 283));
+        pdf.text('Contour de la parcelle en bleu nuit', GX, Math.min(gy, 284));
       }
 
       // ------- colonne droite : chiffres puis texte -------
@@ -985,16 +991,16 @@ $('expWord').onclick = async () => {
         Object.assign({ spacing: { after: 60 } }, i > 0 ? { pageBreakBefore: true } : {})));
       enfants.push(P(T('TRAVAUX — fiche du ' + dateJour(), { size: 16, color: GRIS }), { spacing: { after: 160 } }));
 
-      // ------- colonne gauche : LES TROIS CARTES empilées (plan / photo actuelle / photo 1950-65) -------
+      // ------- colonne gauche : LES TROIS CARTES carrées (plan / photo actuelle / photo 1950-65) -------
       const gauche = [];
-      if (a.idCarte) {
+      if (a.rA3 && !a.rA3.erreur && a.rA3.parcelle) {
         btn.textContent = 'Génération… cartes ' + (i + 1) + '/' + ANALYSES.length;
-        const images = await captureTroisFonds(a.idCarte);
+        const images = await captureTroisFonds(a.rA3.parcelle);
         for (const im of images) {
           const b64 = im.img.data.split(',')[1];
           const bin = atob(b64); const oct = new Uint8Array(bin.length);
           for (let k = 0; k < bin.length; k++) oct[k] = bin.charCodeAt(k);
-          const largeurPx = 225, hauteurPx = Math.round(largeurPx * im.img.h / im.img.w);
+          const largeurPx = 220, hauteurPx = Math.round(largeurPx * im.img.h / im.img.w); // carré ≈ 220 × 220
           gauche.push(new D.Paragraph({ spacing: { before: 100 },
             children: [ new D.ImageRun({ type: 'png', data: oct.buffer, transformation: { width: largeurPx, height: hauteurPx } }) ] }));
           gauche.push(P(T(im.libelle, { size: 14, bold: true, color: NUIT }), { spacing: { after: 80 } }));
