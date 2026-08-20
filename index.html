@@ -1093,8 +1093,8 @@ $('expPdf').onclick = async () => {
       const pts = pointsAttention();
       ty += 9;
       if (ty > 258) { pdf.addPage(); ty = 20; }
-      pdf.setFillColor(...CANARD); pdf.rect(GX - 2, ty - 5, 190, 7.5, 'F');
-      pdf.setFont('helvetica','bold'); pdf.setFontSize(9.5); pdf.setTextColor(255,255,255);
+      pdf.setFillColor(...NUIT); pdf.rect(GX - 2, ty - 5, 190, 7.5, 'F'); // même format que l'en-tête du tableau
+      pdf.setFont('helvetica','bold'); pdf.setFontSize(8.5); pdf.setTextColor(255,255,255);
       pdf.text('POINTS D\'ATTENTION ET ALERTES', GX, ty);
       ty += 9;
       if (!pts.length) {
@@ -1174,7 +1174,7 @@ $('expPdf').onclick = async () => {
       };
 
       // 1 — valeurs clés
-      bandeauSection('1 · VALEURS CLÉS');
+      bandeauSection('1 · DONNÉES CLÉS');
       for (const c of m.chiffres) {
         pdf.setFont(SERIF, SERIF_STYLE); pdf.setFontSize(13); pdf.setTextColor(...NUIT);
         pdf.text(pdfTxt(c.val), DX, dy);
@@ -1288,9 +1288,9 @@ $('expWord').onclick = async () => {
 
       // ------- points d'attention et alertes, sous la liste des parcelles -------
       const pts = pointsAttention();
-      enfants.push(new D.Paragraph({
-        shading: { fill: CANARD }, spacing: { before: 280, after: 100 },
-        children: [ new D.TextRun({ text: '  POINTS D’ATTENTION ET ALERTES', font: 'Segoe UI', size: 20, bold: true, color: 'FFFFFF' }) ]
+      enfants.push(new D.Paragraph({ // même format que l'en-tête du tableau (fond bleu nuit)
+        shading: { fill: NUIT }, spacing: { before: 280, after: 100 },
+        children: [ new D.TextRun({ text: '  POINTS D’ATTENTION ET ALERTES', font: 'Segoe UI', size: 18, bold: true, color: 'FFFFFF' }) ]
       }));
       if (!pts.length) {
         enfants.push(P(T('Aucun point d’attention relevé sur les parcelles analysées.', { size: 18, italics: true, color: GRIS })));
@@ -1340,7 +1340,7 @@ $('expWord').onclick = async () => {
         children: [ new D.TextRun({ text: '  ' + texte, font: 'Segoe UI', size: 20, bold: true, color: 'FFFFFF' }) ]
       });
       const droite = [];
-      droite.push(bandeauW('1 · VALEURS CLÉS'));
+      droite.push(bandeauW('1 · DONNÉES CLÉS'));
       for (const c of m.chiffres) {
         droite.push(P([
           T(c.val, { size: 26, bold: true, color: NUIT }),
