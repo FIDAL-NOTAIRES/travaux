@@ -215,7 +215,7 @@
     <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.
     <b>Géoréférencement</b> : certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l'orthophoto (calage feuille par feuille du PCI) — un contour qui semble déporté sur la photo n'est pas une anomalie de la parcelle ; comparer les formes, pas la superposition.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v7.0</b>
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v7.1</b>
   </div>
 </footer>
 
@@ -1534,11 +1534,19 @@ $('expPdf').onclick = async () => {
       const g = GROUPES[i], m = matiereExport(g);
       pdf.addPage();
 
-      // bandeau titre + filet ocre
+      // bandeau titre + filet ocre — titre borné à 146 mm (la date occupe la droite),
+      // deux lignes en corps réduit pour les unités foncières longues
       pdf.setFillColor(...NUIT); pdf.rect(0, 0, 210, 20, 'F');
       pdf.setFillColor(227,204,122); pdf.rect(0, 20, 210, 1.1, 'F');
       pdf.setTextColor(255,255,255); pdf.setFont(SERIF, SERIF_STYLE); pdf.setFontSize(15);
-      pdf.text(pdfTxt(m.titre), GX, 13);
+      let lignesTitre = pdf.splitTextToSize(pdfTxt(m.titre), 146);
+      if (lignesTitre.length === 1) pdf.text(lignesTitre[0], GX, 13);
+      else {
+        pdf.setFontSize(11.5);
+        lignesTitre = pdf.splitTextToSize(pdfTxt(m.titre), 146);
+        pdf.text(lignesTitre[0], GX, 9.5);
+        pdf.text(lignesTitre.length > 2 ? lignesTitre[1].replace(/.{3}$/, '…') : lignesTitre[1], GX, 16);
+      }
       pdf.setFont('helvetica','normal'); pdf.setFontSize(8); pdf.setTextColor(109,213,220);
       pdf.text('TRAVAUX — ' + dateJour(), 198, 13, { align: 'right' });
 
