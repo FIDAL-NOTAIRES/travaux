@@ -215,7 +215,7 @@
     <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.
     <b>Géoréférencement</b> : certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l'orthophoto (calage feuille par feuille du PCI) — un contour qui semble déporté sur la photo n'est pas une anomalie de la parcelle ; comparer les formes, pas la superposition.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v7.2</b>
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v7.3</b>
   </div>
 </footer>
 
@@ -851,6 +851,35 @@ function anciennete(dateIso, annee){
   const ans = Math.floor(ms / (365.25 * 24 * 3600 * 1000));
   return ans <= 0 ? 'il y a moins d\'un an' : 'il y a ' + ans + ' an' + (ans > 1 ? 's' : '');
 }
+/* R. 462-6 C. urb. — délai de contestation de la conformité : 3 mois à compter de la
+   réception de la DAACT en mairie, 5 mois si récolement obligatoire (R. 462-7).
+   Sitadel ne donne que la « date réelle de la DAACT » : on calcule sur cette base,
+   la date de réception en mairie (récépissé) fait foi. Quantième à quantième,
+   quantième inexistant → dernier jour du mois. Registre : constat, jamais conclusion. */
+function delaiR4626(dateIso){
+  if (!dateIso || !/^\d{4}-\d{2}-\d{2}/.test(String(dateIso))) return null;
+  const d = new Date(String(dateIso).slice(0, 10) + 'T12:00:00');
+  if (isNaN(d)) return null;
+  const ajoute = mois => {
+    const e = new Date(d); const q = e.getDate();
+    e.setMonth(e.getMonth() + mois);
+    if (e.getDate() !== q) e.setDate(0);
+    return e.getFullYear() + '-' + String(e.getMonth() + 1).padStart(2, '0') + '-' + String(e.getDate()).padStart(2, '0');
+  };
+  const f3 = ajoute(3), f5 = ajoute(5);
+  const auj = new Date(); const iso = auj.getFullYear() + '-' + String(auj.getMonth() + 1).padStart(2, '0') + '-' + String(auj.getDate()).padStart(2, '0');
+  return { f3, f5, clos3: f3 < iso, clos5: f5 < iso };
+}
+/* Phrase de constat associée — commune à l'écran et aux exports */
+function texteR4626(dl){
+  const rappel = " Calcul sur la date DAACT de Sitadel — la réception en mairie fait foi ; l'absence de contestation ne vaut pas certificat de conformité.";
+  if (dl.clos5) return { t: 'Délai de contestation de la conformité (R. 462-6) expiré : 3 mois échus le ' + fdate(dl.f3) +
+    ' (5 mois, si récolement obligatoire, échus le ' + fdate(dl.f5) + ').' + rappel, ouvert: false };
+  if (dl.clos3) return { t: 'Délai de contestation de la conformité (R. 462-6) : 3 mois échus le ' + fdate(dl.f3) +
+    ' — mais si un récolement était obligatoire, le délai de 5 mois court jusqu\'au ' + fdate(dl.f5) + '.' + rappel, ouvert: true };
+  return { t: 'Délai de contestation de la conformité (R. 462-6) EN COURS : 3 mois jusqu\'au ' + fdate(dl.f3) +
+    ', 5 mois jusqu\'au ' + fdate(dl.f5) + ' si récolement obligatoire.' + rappel, ouvert: true };
+}
 const fm2 = n => Math.round(n).toLocaleString('fr-FR') + ' m²';
 const COUL = { PC:'var(--nuit)', DP:'var(--canard)', PA:'var(--bleugris)', PD:'var(--carmin)' };
 let numCarte = 0; const cartesEnAttente = [];
@@ -1126,6 +1155,11 @@ function carteAutor(a){
   lg.push(['DAACT', a.dates.daact ? fdate(a.dates.daact) :
     '<span class="alerte-daact">non renseignée dans Sitadel' +
     (ageAut ? ' — autorisation ' + ageAut : '') + (ageDoc ? ', chantier ouvert ' + ageDoc : '') + '</span>']);
+  if (a.dates.daact) {
+    const dl = delaiR4626(a.dates.daact);
+    if (dl) { const tx = texteR4626(dl);
+      lg.push(['Contestation', tx.ouvert ? '<span class="alerte-daact">' + tx.t + '</span>' : tx.t]); }
+  }
   if (a.nature)                     lg.push(['Nature', a.nature]);
   if (a.surfaces.habCreee)          lg.push(['Surface habitation créée', a.surfaces.habCreee + ' m²']);
   if (a.surfaces.locCreee)          lg.push(['Surface locaux créée', a.surfaces.locCreee + ' m²']);
@@ -1363,6 +1397,10 @@ function matiereExport(g){
       if (au.parcelles.length > 1) paires.push(["Parcelles de l'autorisation", au.parcelles.map(x => (x.section||'?') + ' ' + (x.numero||'?')).join(', ')]);
       if (au.demandeur.nom) paires.push(['Demandeur', au.demandeur.nom + (au.demandeur.siren ? ' (SIREN ' + au.demandeur.siren + ')' : '')]);
       for (const px of paires) m.lignesA1.push({ niv: 'paire', label: px[0], val: px[1] });
+      if (au.dates.daact) {
+        const dl = delaiR4626(au.dates.daact);
+        if (dl) { const tx = texteR4626(dl); m.lignesA1.push({ t: tx.t, niv: tx.ouvert ? 'vigilance' : 'note' }); }
+      }
       if (!au.dates.daact) {
         const ageAut = anciennete(au.dates.autorisation, au.anneeDepot);
         const ageDoc = anciennete(au.dates.chantier, null);
@@ -1401,7 +1439,14 @@ function pointsAttention(){
         pts.push({ n: 'orange', p: titre, t: 'Bâti présent, aucune autorisation dans Sitadel (pré-2013 et DP mineures hors champ) — relevé des autorisations en mairie à obtenir.' });
     }
     for (const v of ag.autorisations)
-      if (!v.au.dates.daact) {
+      if (v.au.dates.daact) {
+        const dl = delaiR4626(v.au.dates.daact);
+        if (dl && !dl.clos5)
+          pts.push({ n: 'orange', p: titre, t: 'Délai de contestation de la conformité (R. 462-6) possiblement en cours pour '
+            + v.au.type + ' ' + v.au.numero + (dl.clos3 ? ' — 3 mois échus le ' + fdate(dl.f3) + ', mais 5 mois jusqu\'au ' + fdate(dl.f5) + ' si récolement obligatoire'
+            : ' — 3 mois jusqu\'au ' + fdate(dl.f3) + ', 5 mois jusqu\'au ' + fdate(dl.f5) + ' si récolement obligatoire')
+            + ' (calcul sur la date Sitadel ; la réception en mairie fait foi).' });
+      } else {
         const au = v.au;
         const ageAut = anciennete(au.dates.autorisation, au.anneeDepot);
         const ageDoc = anciennete(au.dates.chantier, null);
