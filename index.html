@@ -215,7 +215,7 @@
     <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.
     <b>Géoréférencement</b> : certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l'orthophoto (calage feuille par feuille du PCI) — un contour qui semble déporté sur la photo n'est pas une anomalie de la parcelle ; comparer les formes, pas la superposition.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v7.3</b>
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v7.4</b>
   </div>
 </footer>
 
@@ -868,10 +868,15 @@ function delaiR4626(dateIso){
   };
   const f3 = ajoute(3), f5 = ajoute(5);
   const auj = new Date(); const iso = auj.getFullYear() + '-' + String(auj.getMonth() + 1).padStart(2, '0') + '-' + String(auj.getDate()).padStart(2, '0');
+  // Garde-fou : des DAACT à date FUTURE existent dans Sitadel (erreurs de saisie,
+  // constaté le 20/08/2026 : dates en 2027, 2029, voire 5201) — on signale, on ne calcule pas.
+  if (String(dateIso).slice(0, 10) > iso) return { futur: true, date: String(dateIso).slice(0, 10) };
   return { f3, f5, clos3: f3 < iso, clos5: f5 < iso };
 }
 /* Phrase de constat associée — commune à l'écran et aux exports */
 function texteR4626(dl){
+  if (dl.futur) return { t: 'DAACT datée du ' + fdate(dl.date) + ' dans Sitadel — postérieure à la date du jour : ' +
+    'date incohérente (erreur de saisie probable), à vérifier en mairie. Délai de contestation non calculé.', ouvert: true };
   const rappel = " Calcul sur la date DAACT de Sitadel — la réception en mairie fait foi ; l'absence de contestation ne vaut pas certificat de conformité.";
   if (dl.clos5) return { t: 'Délai de contestation de la conformité (R. 462-6) expiré : 3 mois échus le ' + fdate(dl.f3) +
     ' (5 mois, si récolement obligatoire, échus le ' + fdate(dl.f5) + ').' + rappel, ouvert: false };
@@ -1441,7 +1446,10 @@ function pointsAttention(){
     for (const v of ag.autorisations)
       if (v.au.dates.daact) {
         const dl = delaiR4626(v.au.dates.daact);
-        if (dl && !dl.clos5)
+        if (dl && dl.futur)
+          pts.push({ n: 'orange', p: titre, t: 'DAACT de ' + v.au.type + ' ' + v.au.numero + ' datée du ' + fdate(dl.date)
+            + ' dans Sitadel — postérieure à la date du jour : date incohérente, à vérifier en mairie.' });
+        else if (dl && !dl.clos5)
           pts.push({ n: 'orange', p: titre, t: 'Délai de contestation de la conformité (R. 462-6) possiblement en cours pour '
             + v.au.type + ' ' + v.au.numero + (dl.clos3 ? ' — 3 mois échus le ' + fdate(dl.f3) + ', mais 5 mois jusqu\'au ' + fdate(dl.f5) + ' si récolement obligatoire'
             : ' — 3 mois jusqu\'au ' + fdate(dl.f3) + ', 5 mois jusqu\'au ' + fdate(dl.f5) + ' si récolement obligatoire')
