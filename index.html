@@ -425,7 +425,18 @@ const EMPRISES = (() => {
     };
   }
 
-  return { emprisesPourParcelle };
+  /* Parcelles voisines (contours) pour habiller les cartes d'export — même source API Carto */
+  async function parcellesVoisines(parcelle){
+    try {
+      const bb = turf.bbox(parcelle);
+      const mx = (bb[2]-bb[0]) * 0.6, my = (bb[3]-bb[1]) * 0.6;
+      const cadre = turf.bboxPolygon([bb[0]-mx, bb[1]-my, bb[2]+mx, bb[3]+my]);
+      const fc = await geoJson(APICARTO + '?geom=' + encodeURIComponent(JSON.stringify(cadre.geometry)) + '&_limit=300');
+      return fc.features || [];
+    } catch(e) { return []; }
+  }
+
+  return { emprisesPourParcelle, parcellesVoisines };
 })();
 
 /* ---------- 3. SAISIE — liste multi-communes (accroche large → validation fine) ---------- */
@@ -880,11 +891,15 @@ const FONDS_EXPORT = [
   { nom: 'histo', couche: 'ORTHOIMAGERY.ORTHOPHOTOS.1950-1965',  format: 'image/png',  libelle: 'Photo aérienne 1950-1965' }
 ];
 
-async function carteExportImage(parcelle, fond){
+async function carteExportImage(parcelle, fond, voisins){
   const atelier = document.getElementById('atelier');
   atelier.innerHTML = '<div id="atelier-carte" style="width:640px;height:640px"></div>';
   const couche = coucheWMTS(fond.couche, fond.format);
   const map = L.map('atelier-carte', { layers: [couche], zoomControl: false, attributionControl: false });
+  // limites des parcelles voisines (contexte cadastral, comme URBA) — pas sur la photo historique
+  if (voisins && voisins.length && fond.nom !== 'histo')
+    L.geoJSON({ type: 'FeatureCollection', features: voisins },
+      { style: { color: fond.nom === 'ortho' ? '#FFFFFF' : '#3a3a3a', weight: 1, fill: false, opacity: 0.85 } }).addTo(map);
   // contour carmin — cohérence avec REDPAR
   const contour = L.geoJSON(parcelle, { style: { color: '#A01040', weight: 4, fillColor: '#A01040', fillOpacity: 0.06 } }).addTo(map);
   map.fitBounds(contour.getBounds().pad(0.35), { maxZoom: 18 });
@@ -894,7 +909,7 @@ async function carteExportImage(parcelle, fond){
     couche.once('load', ok); setTimeout(ok, 3000); });
   let img = null;
   try {
-    const cv = await html2canvas(document.getElementById('atelier-carte'), { useCORS: true, scale: 1.5, logging: false });
+    const cv = await html2canvas(document.getElementById('atelier-carte'), { useCORS: true, scale: 2, logging: false });
     img = { data: cv.toDataURL('image/png'), w: cv.width, h: cv.height };
   } catch(e) { /* tuiles non capturables : vignette absente, export poursuivi */ }
   map.remove(); atelier.innerHTML = '';
@@ -902,9 +917,10 @@ async function carteExportImage(parcelle, fond){
 }
 
 async function captureTroisFonds(parcelle){
+  const voisins = await EMPRISES.parcellesVoisines(parcelle);
   const images = [];
   for (const f of FONDS_EXPORT) {
-    const img = await carteExportImage(parcelle, f);
+    const img = await carteExportImage(parcelle, f, voisins);
     if (img) images.push({ libelle: f.libelle, img });
   }
   return images;
@@ -945,16 +961,16 @@ function matiereExport(a){
   } else {
     for (const au of a.rA1.autorisations) {
       m.lignesA1.push({ t: au.type + ' ' + au.numero + ' — ' + au.etat + (au.dates.autorisation ? ' le ' + fdate(au.dates.autorisation) : au.anneeDepot ? ' (dépôt ' + au.anneeDepot + ')' : ''), niv: 'titre' });
-      const d = [];
-      if (au.nature) d.push('Nature : ' + au.nature);
-      if (au.surfaces.habCreee) d.push('Surf. habitation créée : ' + au.surfaces.habCreee + ' m²');
-      if (au.surfaces.locCreee) d.push('Surf. locaux créée : ' + au.surfaces.locCreee + ' m²');
-      if (au.dates.chantier) d.push('Chantier : ' + fdate(au.dates.chantier));
-      d.push('DAACT : ' + (au.dates.daact ? fdate(au.dates.daact) : 'non renseignée dans Sitadel'));
-      if (au.indicateurs.length) d.push(au.indicateurs.join(', '));
-      if (au.parcelles.length > 1) d.push('Parcelles : ' + au.parcelles.map(x => (x.section||'?') + ' ' + (x.numero||'?')).join(', '));
-      if (au.demandeur.nom) d.push('Demandeur : ' + au.demandeur.nom + (au.demandeur.siren ? ' (SIREN ' + au.demandeur.siren + ')' : ''));
-      m.lignesA1.push({ t: d.join(' · '), niv: 'detail' });
+      const paires = [];
+      if (au.nature) paires.push(['Nature', au.nature]);
+      if (au.surfaces.habCreee) paires.push(['Surface habitation créée', au.surfaces.habCreee + ' m²']);
+      if (au.surfaces.locCreee) paires.push(['Surface locaux créée', au.surfaces.locCreee + ' m²']);
+      if (au.dates.chantier) paires.push(['Ouverture de chantier', fdate(au.dates.chantier)]);
+      paires.push(['DAACT', au.dates.daact ? fdate(au.dates.daact) : 'non renseignée dans Sitadel']);
+      if (au.indicateurs.length) paires.push(['Annexes / travaux', au.indicateurs.join(', ')]);
+      if (au.parcelles.length > 1) paires.push(['Parcelles de l\'autorisation', au.parcelles.map(x => (x.section||'?') + ' ' + (x.numero||'?')).join(', ')]);
+      if (au.demandeur.nom) paires.push(['Demandeur', au.demandeur.nom + (au.demandeur.siren ? ' (SIREN ' + au.demandeur.siren + ')' : '')]);
+      for (const px of paires) m.lignesA1.push({ niv: 'paire', label: px[0], val: px[1] });
       if (!au.dates.daact) m.lignesA1.push({ t: 'Vigilance : DAACT non retrouvée — pièce à obtenir (délai de contestation : R. 462-6 C. urb.).', niv: 'vigilance' });
     }
   }
@@ -976,6 +992,7 @@ $('expPdf').onclick = async () => {
 
     // ------- page 1 : récapitulatif des parcelles (façon REDPAR) -------
     pdf.setFillColor(...NUIT); pdf.rect(0, 0, 210, 26, 'F');
+    pdf.setFillColor(227,204,122); pdf.rect(0, 26, 210, 1.1, 'F'); // filet ocre — signature FIDAL
     pdf.setTextColor(255,255,255); pdf.setFont('helvetica','bold'); pdf.setFontSize(19);
     pdf.text('FICHE TRAVAUX', GX, 13);
     pdf.setFont('helvetica','normal'); pdf.setFontSize(9); pdf.setTextColor(109,213,220);
@@ -1014,8 +1031,9 @@ $('expPdf').onclick = async () => {
       const a = ANALYSES[i], m = matiereExport(a);
       pdf.addPage();
 
-      // bandeau titre
+      // bandeau titre + filet ocre
       pdf.setFillColor(...NUIT); pdf.rect(0, 0, 210, 20, 'F');
+      pdf.setFillColor(227,204,122); pdf.rect(0, 20, 210, 1.1, 'F');
       pdf.setTextColor(255,255,255); pdf.setFont('helvetica','bold'); pdf.setFontSize(15);
       pdf.text(pdfTxt(m.titre), GX, 13);
       pdf.setFont('helvetica','normal'); pdf.setFontSize(8); pdf.setTextColor(109,213,220);
@@ -1069,12 +1087,37 @@ $('expPdf').onclick = async () => {
       }
       dy += 3;
 
+      // grille libellé / valeur (deux colonnes)
+      const paire = (label, val) => {
+        pdf.setFont('helvetica','normal'); pdf.setFontSize(8); pdf.setTextColor(...GRIS);
+        const lignesV = pdf.splitTextToSize(pdfTxt(String(val)), DW - 46);
+        if (dy + lignesV.length * 3.4 > 280) { pdf.addPage(); dy = 20; }
+        pdf.text(pdfTxt(label), DX, dy);
+        pdf.setTextColor(...NOIR);
+        pdf.text(lignesV, DX + 46, dy);
+        dy += lignesV.length * 3.4 + 1.2;
+      };
+      // constat en encadré coloré (comme à l'écran)
+      const encadrePDF = (texte, niveau) => {
+        const fond = niveau === 'vigilance' ? [255,244,231] : niveau === 'erreur' ? [248,233,238] : [234,243,244];
+        const bord = niveau === 'vigilance' ? ORANGE : niveau === 'erreur' ? CARMIN : CANARD;
+        pdf.setFont('helvetica','bold'); pdf.setFontSize(9);
+        const lignes = pdf.splitTextToSize(pdfTxt(texte), DW - 6);
+        const h = lignes.length * 3.8 + 5;
+        if (dy + h > 280) { pdf.addPage(); dy = 20; }
+        pdf.setFillColor(...fond); pdf.rect(DX - 3, dy - 3.5, DW + 6, h, 'F');
+        pdf.setFillColor(...bord); pdf.rect(DX - 3, dy - 3.5, 1.6, h, 'F');
+        pdf.setTextColor(...NUIT);
+        pdf.text(lignes, DX + 1, dy);
+        dy += h + 2.5;
+      };
+
       // 2 — autorisations
       bandeauSection('2 · AUTORISATIONS D\'URBANISME — SITADEL (DEPUIS 2013)');
       for (const l of m.lignesA1) {
         if (l.niv === 'titre')      ecrire(l.t, { gras: true, coul: NUIT, avant: 2 });
-        else if (l.niv === 'detail') ecrire(l.t, { taille: 8, coul: NOIR });
-        else if (l.niv === 'vigilance') ecrire(l.t, { taille: 8.5, gras: true, coul: ORANGE });
+        else if (l.niv === 'paire') paire(l.label, l.val);
+        else if (l.niv === 'vigilance') ecrire(l.t, { taille: 8.5, gras: true, coul: ORANGE, avant: 1 });
         else if (l.niv === 'erreur') ecrire(l.t, { gras: true, coul: CARMIN });
         else ecrire(l.t, { taille: 8, italique: true, coul: GRIS });
       }
@@ -1082,7 +1125,7 @@ $('expPdf').onclick = async () => {
 
       // 3 — bâti réel contre bâti déclaré
       bandeauSection('3 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO');
-      ecrire(m.constat, { gras: true, coul: m.constatNiveau === 'vigilance' ? ORANGE : m.constatNiveau === 'erreur' ? CARMIN : CANARD, avant: 1 });
+      encadrePDF(m.constat, m.constatNiveau);
       if (a.rA3 && !a.rA3.erreur && a.rA3.topo.batiments.length) {
         ecrire('Bâtiments BD TOPO sur la parcelle :', { taille: 8.5, gras: true, coul: NUIT, avant: 2 });
         a.rA3.topo.batiments.slice(0, 8).forEach((b, j) => {
@@ -1092,9 +1135,16 @@ $('expPdf').onclick = async () => {
         ecrire('Date d’apparition BD TOPO : indice de datation, pas preuve.', { taille: 7.5, italique: true, coul: GRIS });
       }
 
-      // pied de page
-      pdf.setFont('helvetica','italic'); pdf.setFontSize(6.5); pdf.setTextColor(...GRIS);
-      pdf.text(pdf.splitTextToSize(RESERVES_EXPORT, 186), GX, 285);
+    }
+
+    // pagination composée sur toutes les pages (les réserves complètes restent en page 1)
+    const nbPages = pdf.getNumberOfPages();
+    for (let p = 1; p <= nbPages; p++) {
+      pdf.setPage(p);
+      pdf.setFont('helvetica','italic'); pdf.setFontSize(7); pdf.setTextColor(...GRIS);
+      pdf.text('TRAVAUX — fiche du ' + dateJour() + ' — document de travail interne, ne fait pas foi de la régularité des constructions', GX, 292);
+      pdf.setFont('helvetica','normal');
+      pdf.text('p. ' + p + ' / ' + nbPages, 198, 292, { align: 'right' });
     }
     pdf.save(dateJour() + ' travaux-fiche.pdf');
   } catch(e) {
@@ -1118,7 +1168,11 @@ $('expWord').onclick = async () => {
 
     // ------- page 1 : récapitulatif des parcelles (façon REDPAR) -------
     enfants.push(P(T('FICHE TRAVAUX', { size: 44, bold: true, color: NUIT })));
-    enfants.push(P(T('Autorisations d’urbanisme et bâti réel par parcelle — ' + dateJour(), { size: 18, color: GRIS }), { spacing: { after: 240 } }));
+    enfants.push(new D.Paragraph({ // filet ocre — signature FIDAL
+      border: { bottom: { style: D.BorderStyle.SINGLE, size: 12, color: 'E3CC7A' } },
+      spacing: { after: 240 },
+      children: [ new D.TextRun({ text: 'Autorisations d’urbanisme et bâti réel par parcelle — ' + dateJour(), font: 'Segoe UI', size: 18, color: GRIS }) ]
+    }));
     {
       const lignes = lignesRecap();
       const enTete = ['Commune', 'Section', 'N°', 'Lieu-dit', 'Contenance'];
@@ -1179,13 +1233,18 @@ $('expWord').onclick = async () => {
       droite.push(bandeauW('2 · AUTORISATIONS D’URBANISME — SITADEL (DEPUIS 2013)'));
       for (const l of m.lignesA1) {
         if (l.niv === 'titre')          droite.push(P(T(l.t, { bold: true, color: NUIT }), { spacing: { before: 100 } }));
-        else if (l.niv === 'detail')    droite.push(P(T(l.t, { size: 17 })));
-        else if (l.niv === 'vigilance') droite.push(P(T(l.t, { size: 18, bold: true, color: ORANGE })));
+        else if (l.niv === 'paire')     droite.push(P([ T(l.label + '  ', { size: 17, color: GRIS }), T(String(l.val), { size: 17, color: NOIR }) ]));
+        else if (l.niv === 'vigilance') droite.push(P(T(l.t, { size: 18, bold: true, color: ORANGE }), { spacing: { before: 60 } }));
         else if (l.niv === 'erreur')    droite.push(P(T(l.t, { bold: true, color: CARMIN })));
         else                            droite.push(P(T(l.t, { size: 17, italics: true, color: GRIS })));
       }
       droite.push(bandeauW('3 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO'));
-      droite.push(P(T(m.constat, { bold: true, color: m.constatNiveau === 'vigilance' ? ORANGE : m.constatNiveau === 'erreur' ? CARMIN : CANARD })));
+      droite.push(new D.Paragraph({
+        shading: { fill: m.constatNiveau === 'vigilance' ? 'FFF4E7' : m.constatNiveau === 'erreur' ? 'F8E9EE' : 'EAF3F4' },
+        border: { left: { style: D.BorderStyle.SINGLE, size: 24, color: m.constatNiveau === 'vigilance' ? 'FF982D' : m.constatNiveau === 'erreur' ? CARMIN : CANARD } },
+        spacing: { after: 100 },
+        children: [ new D.TextRun({ text: ' ' + m.constat, font: 'Segoe UI', size: 20, bold: true, color: NUIT }) ]
+      }));
       if (a.rA3 && !a.rA3.erreur && a.rA3.topo.batiments.length) {
         droite.push(P(T('Bâtiments BD TOPO sur la parcelle :', { size: 18, bold: true, color: NUIT }), { spacing: { before: 100 } }));
         a.rA3.topo.batiments.slice(0, 8).forEach((b, j) => {
@@ -1209,7 +1268,15 @@ $('expWord').onclick = async () => {
       enfants.push(P(T(RESERVES_EXPORT, { size: 14, italics: true, color: GRIS }), { spacing: { before: 240 } }));
     }
 
-    const doc = new D.Document({ sections: [{ children: enfants }] });
+    const pied = new D.Footer({ children: [ new D.Paragraph({
+      alignment: D.AlignmentType.RIGHT,
+      children: [
+        new D.TextRun({ text: 'TRAVAUX — document de travail interne — p. ', font: 'Segoe UI', size: 14, color: GRIS }),
+        new D.TextRun({ font: 'Segoe UI', size: 14, color: GRIS, children: [ D.PageNumber.CURRENT ] }),
+        new D.TextRun({ text: ' / ', font: 'Segoe UI', size: 14, color: GRIS }),
+        new D.TextRun({ font: 'Segoe UI', size: 14, color: GRIS, children: [ D.PageNumber.TOTAL_PAGES ] })
+      ] }) ] });
+    const doc = new D.Document({ sections: [{ footers: { default: pied }, children: enfants }] });
     const blob = await D.Packer.toBlob(doc);
     telecharger(blob, dateJour() + ' travaux-fiche.docx');
   } catch(e) {
