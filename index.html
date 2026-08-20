@@ -348,8 +348,45 @@ const EMPRISES = (() => {
     return { total, retenus };
   }
 
+  /* Lieu-dit : lieux-dits du cadastre Etalab (point-in-polygon au centroïde),
+     repli BAN inverse si la couche est indisponible. Cache par commune. */
+  const cacheLieuxDits = new Map();
+  async function lieuxDitsCommune(insee){
+    if (cacheLieuxDits.has(insee)) return cacheLieuxDits.get(insee);
+    let feats = null;
+    try {
+      const dep = insee.startsWith('97') ? insee.slice(0,3) : insee.slice(0,2);
+      const r = await fetch('https://cadastre.data.gouv.fr/data/etalab-cadastre/latest/geojson/communes/' + dep + '/' + insee + '/cadastre-' + insee + '-lieux_dits.json.gz');
+      if (r.ok && typeof DecompressionStream !== 'undefined') {
+        const flux = r.body.pipeThrough(new DecompressionStream('gzip'));
+        feats = JSON.parse(await new Response(flux).text()).features || null;
+      }
+    } catch(e) { feats = null; }
+    cacheLieuxDits.set(insee, feats);
+    return feats;
+  }
+  async function lieuDitPourParcelle(insee, parcelle){
+    const centre = turf.centroid(parcelle);
+    const lds = await lieuxDitsCommune(insee);
+    if (lds) {
+      for (const f of lds) {
+        try { if (turf.booleanPointInPolygon(centre, f)) return f.properties && (f.properties.nom || f.properties.NOM) || null; } catch(e){}
+      }
+      return null; // couche lue, parcelle hors de tout lieu-dit nommé
+    }
+    // repli : adresse la plus proche (BAN)
+    try {
+      const [lon, lat] = centre.geometry.coordinates;
+      const rep = await (await fetch('https://api-adresse.data.gouv.fr/reverse/?lon=' + lon + '&lat=' + lat)).json();
+      const p0 = rep.features && rep.features[0] && rep.features[0].properties;
+      if (p0 && (p0.type === 'locality' || p0.type === 'street')) return (p0.name || null) && p0.name + ' *';
+    } catch(e){}
+    return null;
+  }
+
   /* CONTRAT PUBLIC : emprisesPourParcelle({insee, section, numero}) →
-     { parcelle(GeoJSON), aireParcelle, cadastre:{total, nb}, topo:{total, nb, batiments:[{aire, hauteur, usage, apparition, etat}]} } */
+     { parcelle(GeoJSON), aireParcelle, contenance, lieuDit,
+       cadastre:{total, nb}, topo:{total, nb, batiments:[{aire, hauteur, usage, apparition, etat}]} } */
   async function emprisesPourParcelle(ref){
     const parcelle = await geometrieParcelle(ref);
     if (!parcelle) throw new Error('parcelle introuvable au plan cadastral');
@@ -362,9 +399,12 @@ const EMPRISES = (() => {
     ]);
     const cad  = empriseSurParcelle(featsCad, parcelle);
     const topo = empriseSurParcelle(featsTopo, parcelle);
+    const lieuDit = await lieuDitPourParcelle(ref.insee, parcelle).catch(() => null);
     return {
       parcelle,
       aireParcelle: turf.area(parcelle),
+      contenance: (parcelle.properties && parcelle.properties.contenance) || null,
+      lieuDit,
       cadastre: { total: cad.total, nb: cad.retenus.length },
       topo: {
         total: topo.total, nb: topo.retenus.length,
@@ -447,7 +487,9 @@ $('ajouterListe').onclick = () => {
   const section = $('sec1').value.trim(), numero = $('num1').value.trim();
   if (!inseeChoisi) { $('communeInfo').innerHTML = '<span class="ko">✗ choisir d\'abord une commune</span>'; return; }
   if (!section || !/^\d+$/.test(numero)) return;
-  ajouterRang({ insee: inseeChoisi, nom: nomCommune, section: section.toUpperCase(), numero, statut: 'ok', msg: '' });
+  const rang = { insee: inseeChoisi, nom: nomCommune, section: section.toUpperCase(), numero, statut: 'attente', msg: 'vérification au cadastre…' };
+  ajouterRang(rang);
+  verifierParcelle(rang);
   $('sec1').value = ''; $('num1').value = ''; $('sec1').focus();
 };
 $('num1').addEventListener('keydown', e => { if (e.key === 'Enter') $('ajouterListe').click(); });
@@ -512,9 +554,26 @@ async function resoudreCommune(r){
       if (!c || !c.code) throw new Error('introuvable');
       cacheCommunes.set(cle, c);
     }
-    r.insee = c.code; r.nom = c.nom; r.statut = 'ok'; r.msg = '';
+    r.insee = c.code; r.nom = c.nom;
+    r.msg = 'vérification au cadastre…'; rendreListe();
+    await verifierParcelle(r); return;
   } catch {
     r.statut = 'erreur'; r.msg = 'commune non résolue : « ' + (r.nomBrut || r.insee) + ' »';
+  }
+  rendreListe();
+}
+
+/* Vérification d'existence de la parcelle au plan cadastral (API Carto), dès l'ajout */
+async function verifierParcelle(r){
+  try {
+    const sec = r.section.trim().toUpperCase().replace(/^0+(?=[A-Z])/,'').padStart(2,'0');
+    const num = String(parseInt(r.numero,10)).padStart(4,'0');
+    const rep = await (await fetch('https://apicarto.ign.fr/api/cadastre/parcelle?code_insee=' + r.insee + '&section=' + sec + '&numero=' + num + '&_limit=1')).json();
+    if (rep.features && rep.features.length) { r.statut = 'ok'; r.msg = ''; }
+    else { r.statut = 'erreur'; r.msg = 'parcelle introuvable au cadastre (' + r.section + ' ' + parseInt(r.numero,10) + ') — vérifier section et numéro'; }
+  } catch {
+    // service indisponible : on n'invalide pas la ligne, l'analyse tranchera
+    r.statut = 'ok'; r.msg = '';
   }
   rendreListe();
 }
@@ -589,12 +648,39 @@ $('lancer').onclick = async () => {
     $('resultats').insertAdjacentHTML('beforeend', fiche(p, rA1, rA3));
     ANALYSES.push({ p, rA1, rA3, idCarte: cartesEnAttente.length > avantCartes ? cartesEnAttente[cartesEnAttente.length - 1].id : null });
   }
-  // Initialiser les cartes après insertion dans le DOM
+  // Tableau récapitulatif en tête (façon REDPAR), puis initialisation des cartes
+  $('resultats').insertAdjacentHTML('afterbegin', tableauRecap());
   for (const c of cartesEnAttente) initCarte(c);
   $('chargement').style.display = 'none';
   if (ANALYSES.length) $('exportsbar').style.display = 'flex';
   majBouton();
 };
+
+// Récapitulatif des parcelles analysées : commune, section, n°, lieu-dit, contenance
+function lignesRecap(){
+  return ANALYSES.map(a => ({
+    commune: a.p.nom,
+    section: a.p.section.toUpperCase(),
+    numero: String(parseInt(a.p.numero, 10)),
+    lieuDit: (a.rA3 && !a.rA3.erreur && a.rA3.lieuDit) || '—',
+    contenance: (a.rA3 && !a.rA3.erreur) ? (a.rA3.contenance || Math.round(a.rA3.aireParcelle)) : null
+  }));
+}
+function tableauRecap(){
+  if (!ANALYSES.length) return '';
+  const lignes = lignesRecap();
+  const banEmploye = lignes.some(l => /\*$/.test(l.lieuDit));
+  let h = '<section class="fiche"><div class="entete"><span class="serif">Parcelles analysées</span>' +
+    '<span class="compte">' + lignes.length + ' parcelle' + (lignes.length > 1 ? 's' : '') + '</span></div><div class="corps">' +
+    '<table class="batitable"><tr><th>Commune</th><th>Section</th><th>N°</th><th>Lieu-dit</th><th>Contenance</th></tr>';
+  for (const l of lignes)
+    h += '<tr><td>' + ech(l.commune) + '</td><td>' + ech(l.section) + '</td><td>' + ech(l.numero) + '</td><td>' + ech(l.lieuDit) + '</td><td>' +
+         (l.contenance ? fnum(l.contenance) + ' m²' : '—') + '</td></tr>';
+  h += '</table>' +
+    (banEmploye ? '<div style="font-size:11px;color:var(--bleugris);margin-top:4px">* lieu-dit approché par l\'adresse la plus proche (BAN), la couche cadastrale étant indisponible.</div>' : '') +
+    '</div></section>';
+  return h;
+}
 
 function fiche(p, rA1, rA3){
   const titre = ech(p.nom) + ' — ' + ech(p.section.toUpperCase()) + ' ' + ech(String(parseInt(p.numero,10)));
@@ -752,7 +838,7 @@ function initCarte(cfg){
     histo: coucheWMTS('ORTHOIMAGERY.ORTHOPHOTOS.1950-1965', 'image/png')
   };
   const map = L.map(cfg.id, { layers: [fonds.plan], scrollWheelZoom: false });
-  const contour = L.geoJSON(cfg.parcelle, { style: { color: '#0F2238', weight: 2.5, fillColor: '#6DD5DC', fillOpacity: 0.12 } }).addTo(map);
+  const contour = L.geoJSON(cfg.parcelle, { style: { color: '#A01040', weight: 2.5, fillColor: '#A01040', fillOpacity: 0.07 } }).addTo(map);
   map.fitBounds(contour.getBounds().pad(0.6));
   let actuel = 'plan';
   function setFond(nom){
@@ -799,7 +885,8 @@ async function carteExportImage(parcelle, fond){
   atelier.innerHTML = '<div id="atelier-carte" style="width:640px;height:640px"></div>';
   const couche = coucheWMTS(fond.couche, fond.format);
   const map = L.map('atelier-carte', { layers: [couche], zoomControl: false, attributionControl: false });
-  const contour = L.geoJSON(parcelle, { style: { color: '#0F2238', weight: 4, fillColor: '#6DD5DC', fillOpacity: 0.10 } }).addTo(map);
+  // contour carmin — cohérence avec REDPAR
+  const contour = L.geoJSON(parcelle, { style: { color: '#A01040', weight: 4, fillColor: '#A01040', fillOpacity: 0.06 } }).addTo(map);
   map.fitBounds(contour.getBounds().pad(0.35), { maxZoom: 18 });
   // attendre le chargement des tuiles (filet à 3 s pour les zones lentes)
   await new Promise(res => { let fini = false;
@@ -887,9 +974,45 @@ $('expPdf').onclick = async () => {
     const GX = 12, GW = 56;          // colonne gauche
     const DX = 76, DW = 122;         // colonne texte à droite
 
+    // ------- page 1 : récapitulatif des parcelles (façon REDPAR) -------
+    pdf.setFillColor(...NUIT); pdf.rect(0, 0, 210, 26, 'F');
+    pdf.setTextColor(255,255,255); pdf.setFont('helvetica','bold'); pdf.setFontSize(19);
+    pdf.text('FICHE TRAVAUX', GX, 13);
+    pdf.setFont('helvetica','normal'); pdf.setFontSize(9); pdf.setTextColor(109,213,220);
+    pdf.text('Autorisations d\'urbanisme et bâti réel par parcelle — ' + dateJour(), GX, 20);
+    {
+      const lignes = lignesRecap();
+      const cols = [ { t:'Commune', x:GX, w:60 }, { t:'Section', x:GX+62, w:18 }, { t:'N°', x:GX+82, w:14 },
+                     { t:'Lieu-dit', x:GX+98, w:56 }, { t:'Contenance', x:GX+156, w:30 } ];
+      let ty = 38;
+      pdf.setFillColor(...NUIT); pdf.rect(GX-2, ty-5, 190, 7.5, 'F');
+      pdf.setFont('helvetica','bold'); pdf.setFontSize(8.5); pdf.setTextColor(255,255,255);
+      cols.forEach(c => pdf.text(c.t, c.x, ty));
+      ty += 7;
+      let alt = false;
+      for (const l of lignes) {
+        if (ty > 280) { pdf.addPage(); ty = 20; }
+        if (alt) { pdf.setFillColor(244,245,247); pdf.rect(GX-2, ty-4.6, 190, 6.6, 'F'); }
+        alt = !alt;
+        pdf.setFont('helvetica','normal'); pdf.setFontSize(8.5); pdf.setTextColor(...NOIR);
+        pdf.text(pdfTxt(l.commune).slice(0,42), cols[0].x, ty);
+        pdf.text(l.section, cols[1].x, ty);
+        pdf.text(l.numero, cols[2].x, ty);
+        pdf.text(pdfTxt(l.lieuDit).slice(0,38), cols[3].x, ty);
+        pdf.text(l.contenance ? fnum(l.contenance) + ' m2' : '—', cols[4].x, ty);
+        ty += 6.6;
+      }
+      if (lignes.some(l => /\*$/.test(l.lieuDit))) {
+        pdf.setFont('helvetica','italic'); pdf.setFontSize(7); pdf.setTextColor(...GRIS);
+        pdf.text('* lieu-dit approché par l\'adresse la plus proche (BAN).', GX, ty + 3);
+      }
+      pdf.setFont('helvetica','italic'); pdf.setFontSize(6.5); pdf.setTextColor(...GRIS);
+      pdf.text(pdf.splitTextToSize(pdfTxt(RESERVES_EXPORT), 186), GX, 285);
+    }
+
     for (let i = 0; i < ANALYSES.length; i++) {
       const a = ANALYSES[i], m = matiereExport(a);
-      if (i > 0) pdf.addPage();
+      pdf.addPage();
 
       // bandeau titre
       pdf.setFillColor(...NUIT); pdf.rect(0, 0, 210, 20, 'F');
@@ -912,8 +1035,6 @@ $('expPdf').onclick = async () => {
           pdf.text(pdfTxt(im.libelle), GX, gy + ih + 3.5);
           gy += ih + 9;
         }
-        pdf.setFontSize(6.5); pdf.setTextColor(...GRIS);
-        pdf.text('Contour de la parcelle en bleu nuit', GX, Math.min(gy, 284));
       }
 
       // ------- colonne droite : chiffres puis texte -------
@@ -983,12 +1104,33 @@ $('expWord').onclick = async () => {
                         insideHorizontal:{style:D.BorderStyle.NONE}, insideVertical:{style:D.BorderStyle.NONE} };
     const enfants = [];
 
+    // ------- page 1 : récapitulatif des parcelles (façon REDPAR) -------
+    enfants.push(P(T('FICHE TRAVAUX', { size: 44, bold: true, color: NUIT })));
+    enfants.push(P(T('Autorisations d’urbanisme et bâti réel par parcelle — ' + dateJour(), { size: 18, color: GRIS }), { spacing: { after: 240 } }));
+    {
+      const lignes = lignesRecap();
+      const enTete = ['Commune', 'Section', 'N°', 'Lieu-dit', 'Contenance'];
+      const rangs = [ new D.TableRow({ tableHeader: true, children: enTete.map(t =>
+        new D.TableCell({ shading: { fill: NUIT }, children: [P(T(t, { bold: true, color: 'FFFFFF', size: 18 }))] })) }) ];
+      lignes.forEach((l, k) => {
+        const fond = k % 2 ? 'F4F5F7' : 'FFFFFF';
+        rangs.push(new D.TableRow({ children: [
+          l.commune, l.section, l.numero, l.lieuDit,
+          l.contenance ? fnum(l.contenance) + ' m²' : '—'
+        ].map(v => new D.TableCell({ shading: { fill: fond }, children: [P(T(String(v), { size: 18 }))] })) }));
+      });
+      enfants.push(new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, rows: rangs }));
+      if (lignes.some(l => /\*$/.test(l.lieuDit)))
+        enfants.push(P(T('* lieu-dit approché par l’adresse la plus proche (BAN).', { size: 14, italics: true, color: GRIS }), { spacing: { before: 80 } }));
+      enfants.push(P(T(RESERVES_EXPORT, { size: 14, italics: true, color: GRIS }), { spacing: { before: 240 } }));
+    }
+
     for (let i = 0; i < ANALYSES.length; i++) {
       const a = ANALYSES[i], m = matiereExport(a);
 
-      // titre de page (saut de page avant chaque parcelle sauf la première)
+      // titre de page (une page par parcelle, après la page récapitulative)
       enfants.push(P(T(m.titre, { size: 36, bold: true, color: NUIT }),
-        Object.assign({ spacing: { after: 60 } }, i > 0 ? { pageBreakBefore: true } : {})));
+        { spacing: { after: 60 }, pageBreakBefore: true }));
       enfants.push(P(T('TRAVAUX — fiche du ' + dateJour(), { size: 16, color: GRIS }), { spacing: { after: 160 } }));
 
       // ------- colonne gauche : LES TROIS CARTES carrées (plan / photo actuelle / photo 1950-65) -------
@@ -1005,7 +1147,6 @@ $('expWord').onclick = async () => {
             children: [ new D.ImageRun({ type: 'png', data: oct.buffer, transformation: { width: largeurPx, height: hauteurPx } }) ] }));
           gauche.push(P(T(im.libelle, { size: 14, bold: true, color: NUIT }), { spacing: { after: 80 } }));
         }
-        gauche.push(P(T('Contour de la parcelle en bleu nuit', { size: 13, italics: true, color: GRIS })));
       }
       if (!gauche.length) gauche.push(P(T('—', { color: GRIS })));
 
