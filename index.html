@@ -365,14 +365,19 @@ const EMPRISES = (() => {
       cadastre: { total: cad.total, nb: cad.retenus.length },
       topo: {
         total: topo.total, nb: topo.retenus.length,
-        batiments: topo.retenus.map(x => ({
-          aire: x.aire,
-          hauteur: x.feat.properties.hauteur ?? null,
-          usage: x.feat.properties.usage_1 ?? null,
-          apparition: x.feat.properties.date_d_apparition ?? null,
-          etat: x.feat.properties.etat_de_l_objet ?? null,
-          logements: x.feat.properties.nombre_de_logements ?? null
-        })).sort((a,b) => b.aire - a.aire)
+        batiments: topo.retenus.map(x => {
+          let app = x.feat.properties.date_d_apparition ?? null;
+          // 01/01/1800 et assimilés = valeur conventionnelle IGN, pas une date réelle
+          if (app && parseInt(String(app).slice(0,4), 10) < 1900) app = null;
+          return {
+            aire: x.aire,
+            hauteur: x.feat.properties.hauteur ?? null,
+            usage: x.feat.properties.usage_1 ?? null,
+            apparition: app,
+            etat: x.feat.properties.etat_de_l_objet ?? null,
+            logements: x.feat.properties.nombre_de_logements ?? null
+          };
+        }).sort((a,b) => b.aire - a.aire)
       }
     };
   }
@@ -733,6 +738,8 @@ function coucheWMTS(layer, format){
     { maxZoom: 19, attribution: 'IGN — Géoplateforme', crossOrigin: 'anonymous' });
 }
 
+const CARTES = {}; // registre des cartes vivantes, pour les exports (bascule de fond + capture)
+
 function initCarte(cfg){
   const el = document.getElementById(cfg.id);
   if (!el) return;
@@ -744,17 +751,26 @@ function initCarte(cfg){
   const map = L.map(cfg.id, { layers: [fonds.plan], scrollWheelZoom: false });
   const contour = L.geoJSON(cfg.parcelle, { style: { color: '#0F2238', weight: 2.5, fillColor: '#6DD5DC', fillOpacity: 0.12 } }).addTo(map);
   map.fitBounds(contour.getBounds().pad(0.6));
-  let actuel = fonds.plan;
+  let actuel = 'plan';
+  function setFond(nom){
+    return new Promise(res => {
+      if (nom === actuel) return res();
+      map.removeLayer(fonds[actuel]);
+      const couche = fonds[nom];
+      let fini = false;
+      const ok = () => { if (!fini) { fini = true; contour.bringToFront(); setTimeout(res, 250); } };
+      couche.once('load', ok);
+      setTimeout(ok, 2500); // filet : tuiles lentes ou déjà en cache
+      couche.addTo(map);
+      actuel = nom;
+      document.getElementById('fonds-' + cfg.id).querySelectorAll('button').forEach(x =>
+        x.classList.toggle('actif', x.dataset.fond === nom));
+    });
+  }
   document.getElementById('fonds-' + cfg.id).querySelectorAll('button').forEach(b => {
-    b.onclick = () => {
-      map.removeLayer(actuel);
-      actuel = fonds[b.dataset.fond];
-      actuel.addTo(map);
-      contour.bringToFront();
-      document.getElementById('fonds-' + cfg.id).querySelectorAll('button').forEach(x => x.classList.remove('actif'));
-      b.classList.add('actif');
-    };
+    b.onclick = () => setFond(b.dataset.fond);
   });
+  CARTES[cfg.id] = { setFond, getFond: () => actuel };
 }
 
 /* ---------- 6. EXPORTS (conventions URBA : Word canard éditable, PDF bleu nuit direct) ---------- */
@@ -780,6 +796,35 @@ async function captureCarte(id){
   finally { if (ctrl) ctrl.style.display = ''; }
 }
 
+// Capture des TROIS fonds d'une carte : plan cadastral, photo actuelle, photo 1950-65
+const FONDS_EXPORT = [
+  { nom: 'plan',  libelle: 'Plan IGN / cadastre' },
+  { nom: 'ortho', libelle: 'Photo aérienne actuelle' },
+  { nom: 'histo', libelle: 'Photo aérienne 1950-1965' }
+];
+async function captureTroisFonds(id, progres){
+  const c = CARTES[id];
+  if (!c) return [];
+  const initial = c.getFond();
+  const images = [];
+  for (const f of FONDS_EXPORT) {
+    if (progres) progres(f.libelle);
+    await c.setFond(f.nom);
+    const img = await captureCarte(id);
+    if (img) images.push({ libelle: f.libelle, img });
+  }
+  await c.setFond(initial);
+  return images;
+}
+
+// Texte sûr pour jsPDF (polices WinAnsi) : signes et espaces typographiques remplacés
+const pdfTxt = s => String(s)
+  .replace(/−/g, '-').replace(/’/g, "'")
+  .replace(/[    ]/g, ' ')
+  .replace(/→/g, '->');
+// Milliers avec espace simple (toLocaleString insère une espace fine insécable illisible en PDF)
+const fnum = n => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+
 // Prépare la matière d'export d'une analyse : chiffres A3 + lignes de texte
 function matiereExport(a){
   const m = { titre: a.p.nom + ' — ' + a.p.section.toUpperCase() + ' ' + String(parseInt(a.p.numero,10)),
@@ -788,11 +833,11 @@ function matiereExport(a){
     const A = a.rA3.cadastre.total, B = a.rA3.topo.total;
     const ec = A > 0 ? (B - A) / A : null;
     m.chiffres = [
-      { val: Math.round(a.rA3.aireParcelle).toLocaleString('fr-FR') + ' m²', lib: 'contenance graphique de la parcelle' },
-      { val: Math.round(A).toLocaleString('fr-FR') + ' m²', lib: 'emprise bâtie au plan cadastral (' + a.rA3.cadastre.nb + ' bât.)' },
-      { val: Math.round(B).toLocaleString('fr-FR') + ' m²', lib: 'emprise bâtie BD TOPO — photogrammétrie (' + a.rA3.topo.nb + ' bât.)' }
+      { val: fnum(a.rA3.aireParcelle) + ' m²', lib: 'contenance graphique de la parcelle' },
+      { val: fnum(A) + ' m²', lib: 'emprise bâtie au plan cadastral (' + a.rA3.cadastre.nb + ' bât.)' },
+      { val: fnum(B) + ' m²', lib: 'emprise bâtie BD TOPO — photogrammétrie (' + a.rA3.topo.nb + ' bât.)' }
     ];
-    if (ec !== null) m.chiffres.push({ val: (ec >= 0 ? '+' : '') + (ec * 100).toFixed(1) + ' %', lib: 'écart (B − A) / A — seuil provisoire 5 %' });
+    if (ec !== null) m.chiffres.push({ val: (ec >= 0 ? '+' : '') + (ec * 100).toFixed(1) + ' %', lib: 'écart (B - A) / A — seuil provisoire 5 %' });
     if (B < SURFACE_MIN && A < SURFACE_MIN) { m.constat = 'Pas de bâti significatif détecté.'; }
     else if (A < SURFACE_MIN && B >= SURFACE_MIN) { m.constat = 'Emprise bâtie visible en photogrammétrie sans bâti significatif au plan cadastral — à instruire au regard des autorisations d’urbanisme et de la déclaration au service du cadastre.'; m.constatNiveau = 'vigilance'; }
     else if (ec !== null && ec > SEUIL_ECART) { m.constat = 'Emprise photogrammétrique supérieure de ' + (ec * 100).toFixed(1) + ' % à celle du plan cadastral (seuil provisoire 5 %, non calibré) — à instruire.'; m.constatNiveau = 'vigilance'; }
@@ -843,44 +888,50 @@ $('expPdf').onclick = async () => {
       // bandeau titre
       pdf.setFillColor(...NUIT); pdf.rect(0, 0, 210, 20, 'F');
       pdf.setTextColor(255,255,255); pdf.setFont('helvetica','bold'); pdf.setFontSize(15);
-      pdf.text(m.titre, GX, 13);
+      pdf.text(pdfTxt(m.titre), GX, 13);
       pdf.setFont('helvetica','normal'); pdf.setFontSize(8); pdf.setTextColor(109,213,220);
       pdf.text('TRAVAUX — ' + dateJour(), 198, 13, { align: 'right' });
 
-      // ------- colonne gauche : les chiffres empilés -------
-      let gy = 32;
-      for (const c of m.chiffres) {
-        pdf.setFont('helvetica','bold'); pdf.setFontSize(17); pdf.setTextColor(...NUIT);
-        pdf.text(c.val, GX, gy);
-        pdf.setFont('helvetica','normal'); pdf.setFontSize(7.5); pdf.setTextColor(...GRIS);
-        const lib = pdf.splitTextToSize(c.lib, GW);
-        pdf.text(lib, GX, gy + 4.5);
-        gy += 8 + lib.length * 3.2 + 4;
-      }
-      // carte sous les chiffres
+      // ------- colonne gauche : LES TROIS CARTES empilées (plan / photo actuelle / photo 1950-65) -------
       if (a.idCarte) {
-        const img = await captureCarte(a.idCarte);
-        if (img) {
-          const iw = GW, ih = Math.min(iw * img.h / img.w, 275 - gy);
-          pdf.addImage(img.data, 'PNG', GX, gy + 2, iw, ih);
-          pdf.setDrawColor(...GRIS); pdf.rect(GX, gy + 2, iw, ih);
-          pdf.setFontSize(6.5); pdf.setTextColor(...GRIS);
-          pdf.text('Fond Plan IGN — contour de la parcelle en bleu nuit', GX, gy + ih + 6);
+        btn.textContent = 'Génération… cartes ' + (i + 1) + '/' + ANALYSES.length;
+        const images = await captureTroisFonds(a.idCarte);
+        let gy = 28;
+        for (const im of images) {
+          const iw = GW, ih = Math.min(iw * im.img.h / im.img.w, 72);
+          if (gy + ih + 8 > 283) break;
+          pdf.addImage(im.img.data, 'PNG', GX, gy, iw, ih);
+          pdf.setDrawColor(...GRIS); pdf.rect(GX, gy, iw, ih);
+          pdf.setFont('helvetica','normal'); pdf.setFontSize(7); pdf.setTextColor(...NUIT);
+          pdf.text(pdfTxt(im.libelle), GX, gy + ih + 3.5);
+          gy += ih + 8;
         }
+        pdf.setFontSize(6.5); pdf.setTextColor(...GRIS);
+        pdf.text('Contour de la parcelle en bleu nuit', GX, Math.min(gy, 283));
       }
 
-      // ------- colonne droite : le texte -------
+      // ------- colonne droite : chiffres puis texte -------
       let dy = 30;
       const ecrire = (texte, opts) => {
         const o = Object.assign({ taille: 9, gras: false, coul: NOIR, avant: 0, italique: false }, opts || {});
         dy += o.avant;
         pdf.setFont('helvetica', o.gras ? 'bold' : (o.italique ? 'italic' : 'normal'));
         pdf.setFontSize(o.taille); pdf.setTextColor(...o.coul);
-        const lignes = pdf.splitTextToSize(texte, DW);
-        if (dy + lignes.length * (o.taille * 0.42) > 288) { pdf.addPage(); dy = 20; }
+        const lignes = pdf.splitTextToSize(pdfTxt(texte), DW);
+        if (dy + lignes.length * (o.taille * 0.42) > 280) { pdf.addPage(); dy = 20; }
         pdf.text(lignes, DX, dy);
         dy += lignes.length * (o.taille * 0.42) + 1.5;
       };
+
+      // les chiffres, en tête de colonne de droite
+      for (const c of m.chiffres) {
+        pdf.setFont('helvetica','bold'); pdf.setFontSize(13); pdf.setTextColor(...NUIT);
+        pdf.text(pdfTxt(c.val), DX, dy);
+        pdf.setFont('helvetica','normal'); pdf.setFontSize(7.5); pdf.setTextColor(...GRIS);
+        pdf.text(pdfTxt('— ' + c.lib), DX + 30, dy);
+        dy += 6.5;
+      }
+      dy += 2;
 
       ecrire('/ Autorisations d’urbanisme (Sitadel, depuis 2013)', { taille: 11, gras: true, coul: CANARD, avant: 2 });
       for (const l of m.lignesA1) {
@@ -934,29 +985,33 @@ $('expWord').onclick = async () => {
         Object.assign({ spacing: { after: 60 } }, i > 0 ? { pageBreakBefore: true } : {})));
       enfants.push(P(T('TRAVAUX — fiche du ' + dateJour(), { size: 16, color: GRIS }), { spacing: { after: 160 } }));
 
-      // ------- colonne gauche : chiffres empilés + carte -------
+      // ------- colonne gauche : LES TROIS CARTES empilées (plan / photo actuelle / photo 1950-65) -------
       const gauche = [];
-      for (const c of m.chiffres) {
-        gauche.push(P(T(c.val, { size: 32, bold: true, color: NUIT }), { spacing: { before: 120 } }));
-        gauche.push(P(T(c.lib, { size: 15, color: GRIS }), { spacing: { after: 60 } }));
-      }
       if (a.idCarte) {
-        const img = await captureCarte(a.idCarte);
-        if (img) {
-          const b64 = img.data.split(',')[1];
+        btn.textContent = 'Génération… cartes ' + (i + 1) + '/' + ANALYSES.length;
+        const images = await captureTroisFonds(a.idCarte);
+        for (const im of images) {
+          const b64 = im.img.data.split(',')[1];
           const bin = atob(b64); const oct = new Uint8Array(bin.length);
           for (let k = 0; k < bin.length; k++) oct[k] = bin.charCodeAt(k);
-          const largeurPx = 230, hauteurPx = Math.round(largeurPx * img.h / img.w);
-          gauche.push(new D.Paragraph({ spacing: { before: 160 },
+          const largeurPx = 225, hauteurPx = Math.round(largeurPx * im.img.h / im.img.w);
+          gauche.push(new D.Paragraph({ spacing: { before: 100 },
             children: [ new D.ImageRun({ type: 'png', data: oct.buffer, transformation: { width: largeurPx, height: hauteurPx } }) ] }));
-          gauche.push(P(T('Fond Plan IGN — contour de la parcelle en bleu nuit', { size: 13, italics: true, color: GRIS })));
+          gauche.push(P(T(im.libelle, { size: 14, bold: true, color: NUIT }), { spacing: { after: 80 } }));
         }
+        gauche.push(P(T('Contour de la parcelle en bleu nuit', { size: 13, italics: true, color: GRIS })));
       }
       if (!gauche.length) gauche.push(P(T('—', { color: GRIS })));
 
-      // ------- colonne droite : le texte -------
+      // ------- colonne droite : chiffres puis texte -------
       const droite = [];
-      droite.push(P(T('/ Autorisations d’urbanisme (Sitadel, depuis 2013)', { size: 24, bold: true, color: CANARD }), { spacing: { after: 80 } }));
+      for (const c of m.chiffres) {
+        droite.push(P([
+          T(c.val, { size: 26, bold: true, color: NUIT }),
+          T('  — ' + c.lib, { size: 15, color: GRIS })
+        ], { spacing: { after: 40 } }));
+      }
+      droite.push(P(T('/ Autorisations d’urbanisme (Sitadel, depuis 2013)', { size: 24, bold: true, color: CANARD }), { spacing: { before: 160, after: 80 } }));
       for (const l of m.lignesA1) {
         if (l.niv === 'titre')          droite.push(P(T(l.t, { bold: true, color: NUIT }), { spacing: { before: 100 } }));
         else if (l.niv === 'detail')    droite.push(P(T(l.t, { size: 17 })));
