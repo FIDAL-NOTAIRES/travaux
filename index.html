@@ -215,7 +215,7 @@
     <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.
     <b>Géoréférencement</b> : certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l'orthophoto (calage feuille par feuille du PCI) — un contour qui semble déporté sur la photo n'est pas une anomalie de la parcelle ; comparer les formes, pas la superposition.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v6.10</b>
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v7.0</b>
   </div>
 </footer>
 
@@ -854,7 +854,76 @@ function anciennete(dateIso, annee){
 const fm2 = n => Math.round(n).toLocaleString('fr-FR') + ' m²';
 const COUL = { PC:'var(--nuit)', DP:'var(--canard)', PA:'var(--bleugris)', PD:'var(--carmin)' };
 let numCarte = 0; const cartesEnAttente = [];
-const ANALYSES = []; // {p, rA1, rA3, idCarte} — matière des exports
+const ANALYSES = []; // {p, rA1, rA3} — une entrée par parcelle analysée
+const GROUPES = [];  // unités foncières : {items:[analyses], unite:bool, etiquette, idCarte} — matière des fiches et exports
+
+const refLabel = p => p.section.toUpperCase() + ' ' + parseInt(p.numero, 10);
+
+/* Unités foncières — convention REDPAR : « réunit ce qui se touche » (même commune,
+   géométries contiguës). Retirer une parcelle de la liste suffit à la sortir de l'unité. */
+function regrouperUnites(){
+  const n = ANALYSES.length;
+  const parent = [...Array(n).keys()];
+  const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    const a = ANALYSES[i], b = ANALYSES[j];
+    if (a.p.insee !== b.p.insee) continue;
+    if (!a.rA3 || a.rA3.erreur || !b.rA3 || b.rA3.erreur) continue;
+    try { if (turf.booleanIntersects(a.rA3.parcelle, b.rA3.parcelle)) parent[find(j)] = find(i); } catch(e) {}
+  }
+  const paquets = new Map();
+  ANALYSES.forEach((a, i) => { const r = find(i); if (!paquets.has(r)) paquets.set(r, []); paquets.get(r).push(a); });
+  GROUPES.length = 0;
+  let nU = 0;
+  for (const items of paquets.values()) {
+    items.sort((x, y) => refLabel(x.p).localeCompare(refLabel(y.p), 'fr', { numeric: true }));
+    const unite = items.length > 1;
+    const etiquette = unite ? 'UF-' + (++nU) : '';
+    items.forEach(a => { a.groupe = etiquette; });
+    GROUPES.push({ items, unite, etiquette, idCarte: null });
+  }
+  return GROUPES;
+}
+
+/* Agrégats d'un groupe (parcelle isolée ou unité foncière) — consommés par la fiche,
+   les exports et les points d'attention. Autorisations dédupliquées : chaque PC/DP
+   apparaît UNE fois, avec les parcelles de l'unité qu'il couvre (subdivision demandée). */
+function agreger(g){
+  const items = g.items;
+  const commune = items[0].p.nom;
+  const refs = items.map(x => refLabel(x.p));
+  const titre = g.unite ? commune + ' — Unité foncière · ' + refs.join(', ') : commune + ' — ' + refs[0];
+  const vues = new Map(); const indisponibles = new Set(); const sansA1 = [];
+  for (const it of items) {
+    if (!it.rA1) { sansA1.push(refLabel(it.p)); continue; }
+    it.rA1.indisponibles.forEach(x => indisponibles.add(x));
+    for (const au of it.rA1.autorisations) {
+      const cle = au.jeu + '|' + au.numero;
+      if (!vues.has(cle)) vues.set(cle, { au, couvertes: new Set() });
+      vues.get(cle).couvertes.add(refLabel(it.p));
+    }
+  }
+  const autorisations = [...vues.values()].map(v => ({ au: v.au, couvertes: [...v.couvertes] }))
+    .sort((x, y) => (y.au.dates.autorisation || '').localeCompare(x.au.dates.autorisation || ''));
+  let aire = 0, contenance = 0, A = 0, B = 0, nbCad = 0, nbTopo = 0;
+  const erreursA3 = [], parcs = [], batiments = [], geos = [], lieuxDits = new Set();
+  for (const it of items) {
+    if (!it.rA3 || it.rA3.erreur) { erreursA3.push(refLabel(it.p)); continue; }
+    const r = it.rA3;
+    aire += r.aireParcelle; contenance += (r.contenance || Math.round(r.aireParcelle));
+    A += r.cadastre.total; B += r.topo.total; nbCad += r.cadastre.nb; nbTopo += r.topo.nb;
+    geos.push(r.parcelle);
+    if (r.lieuDit && r.lieuDit !== '—') lieuxDits.add(r.lieuDit);
+    const ec = r.cadastre.total > 0 ? (r.topo.total - r.cadastre.total) / r.cadastre.total : null;
+    parcs.push({ label: refLabel(it.p), aire: r.aireParcelle, A: r.cadastre.total, B: r.topo.total, ecart: ec });
+    r.topo.batiments.forEach(b => batiments.push(Object.assign({ parcelle: refLabel(it.p) }, b)));
+  }
+  batiments.sort((x, y) => y.aire - x.aire);
+  return { commune, refs, titre, autorisations, indisponibles: [...indisponibles], sansA1,
+           aire, contenance, A, B, nbCad, nbTopo, ecart: A > 0 ? (B - A) / A : null,
+           erreursA3, parcs, batiments, geos, lieuxDits: [...lieuxDits],
+           prefixes: [...new Set(items.map(x => x.p.prefixe).filter(x => x && x !== '000'))] };
+}
 
 $('lancer').onclick = async () => {
   const parcelles = LISTE.filter(r => r.statut === 'ok');
@@ -865,6 +934,7 @@ $('lancer').onclick = async () => {
   $('chargement').style.display = 'block';
   $('lancer').disabled = true;
   let n = 0;
+  // phase 1 — analyser toutes les parcelles
   for (const p of parcelles) {
     n++;
     $('chargetxt').textContent = 'Analyse — ' + p.nom + ' ' + p.section + ' ' + p.numero + ' (' + n + '/' + parcelles.length + ') : Sitadel + emprises…';
@@ -873,9 +943,16 @@ $('lancer').onclick = async () => {
       SITADEL.autorisationsPourParcelle(ref).catch(() => null),
       EMPRISES.emprisesPourParcelle(ref).catch(e => ({ erreur: e.message }))
     ]);
+    ANALYSES.push({ p, rA1, rA3 });
+  }
+  // phase 2 — constituer les unités foncières (contiguïté, convention REDPAR)
+  $('chargetxt').textContent = 'Constitution des unités foncières…';
+  regrouperUnites();
+  // phase 3 — une fiche par groupe (unité foncière ou parcelle isolée)
+  for (const g of GROUPES) {
     const avantCartes = cartesEnAttente.length;
-    $('resultats').insertAdjacentHTML('beforeend', fiche(p, rA1, rA3));
-    ANALYSES.push({ p, rA1, rA3, idCarte: cartesEnAttente.length > avantCartes ? cartesEnAttente[cartesEnAttente.length - 1].id : null });
+    $('resultats').insertAdjacentHTML('beforeend', fiche(g));
+    g.idCarte = cartesEnAttente.length > avantCartes ? cartesEnAttente[cartesEnAttente.length - 1].id : null;
   }
   // Tableau récapitulatif en tête (façon REDPAR), puis initialisation des cartes
   $('resultats').insertAdjacentHTML('afterbegin', tableauRecap());
@@ -892,7 +969,8 @@ function lignesRecap(){
     section: a.p.section.toUpperCase(),
     numero: String(parseInt(a.p.numero, 10)),
     lieuDit: (a.rA3 && !a.rA3.erreur && a.rA3.lieuDit) || '—',
-    contenance: (a.rA3 && !a.rA3.erreur) ? (a.rA3.contenance || Math.round(a.rA3.aireParcelle)) : null
+    contenance: (a.rA3 && !a.rA3.erreur) ? (a.rA3.contenance || Math.round(a.rA3.aireParcelle)) : null,
+    unite: a.groupe || '—'
   }));
 }
 function tableauRecap(){
@@ -901,68 +979,81 @@ function tableauRecap(){
   const banEmploye = lignes.some(l => /\*$/.test(l.lieuDit));
   let h = '<section class="fiche"><div class="entete"><span class="serif">Parcelles analysées</span>' +
     '<span class="compte">' + lignes.length + ' parcelle' + (lignes.length > 1 ? 's' : '') + '</span></div><div class="corps">' +
-    '<table class="batitable"><tr><th>Commune</th><th>Section</th><th>N°</th><th>Lieu-dit</th><th>Contenance</th></tr>';
+    '<table class="batitable"><tr><th>Commune</th><th>Section</th><th>N°</th><th>Lieu-dit</th><th>Contenance</th><th>Unité</th></tr>';
   for (const l of lignes)
     h += '<tr><td>' + ech(l.commune) + '</td><td>' + ech(l.section) + '</td><td>' + ech(l.numero) + '</td><td>' + ech(l.lieuDit) + '</td><td>' +
-         (l.contenance ? fnum(l.contenance) + ' m²' : '—') + '</td></tr>';
+         (l.contenance ? fnum(l.contenance) + ' m²' : '—') + '</td><td>' + ech(l.unite) + '</td></tr>';
   h += '</table>' +
     (banEmploye ? '<div style="font-size:11px;color:var(--bleugris);margin-top:4px">* lieu-dit approché par l\'adresse la plus proche (BAN), la couche cadastrale étant indisponible.</div>' : '') +
     '</div></section>';
   return h;
 }
 
-function fiche(p, rA1, rA3){
-  const titre = ech(p.nom) + ' — ' + ech(p.section.toUpperCase()) + ' ' + ech(String(parseInt(p.numero,10)));
+function fiche(g){
+  const ag = agreger(g);
+  const titre = ech(ag.titre);
   let corps = '';
 
-  /* ===== AXE A1 ===== */
-  corps += '<div class="soustitre"><span class="slash">/</span> Autorisations d\'urbanisme <span style="font-size:11px;color:var(--bleugris);font-weight:400">(Sitadel, depuis 2013)</span></div>';
+  if (g.unite)
+    corps += '<div class="encadre enc-canard"><b>Unité foncière (' + g.etiquette + ') — ' + ag.parcs.length + ' parcelles contiguës.</b>' +
+      'Fiche commune : autorisations dédupliquées sur l\'ensemble, emprises agrégées, détail par parcelle ci-dessous. ' +
+      'Convention REDPAR : l\'unité réunit ce qui se touche — retirer une parcelle de la liste l\'en sort.</div>';
 
-  if (p.prefixe && p.prefixe !== '000')
-    corps += '<div class="encadre enc-gris"><b>Parcelle d\'une ancienne commune (préfixe cadastral ' + ech(p.prefixe) + ').</b>' +
+  /* ===== AXE A1 ===== */
+  corps += '<div class="soustitre"><span class="slash">/</span> Autorisations d\'urbanisme <span style="font-size:11px;color:var(--bleugris);font-weight:400">(Sitadel, depuis 2013' + (g.unite ? ' — chaque autorisation une seule fois, avec les parcelles couvertes' : '') + ')</span></div>';
+
+  if (ag.prefixes.length)
+    corps += '<div class="encadre enc-gris"><b>Parcelle(s) d\'une ancienne commune (préfixe cadastral ' + ag.prefixes.map(ech).join(', ') + ').</b>' +
       'Sitadel ne porte pas les préfixes de section : les autorisations listées peuvent concerner une parcelle homonyme d\'une autre partie de la commune actuelle — correspondance à confirmer sur pièces.</div>';
 
-  let nbAutor = 0;
-  if (!rA1) {
-    corps += '<div class="encadre enc-carmin"><b>Sitadel indisponible — parcelle à retraiter.</b>La source n\'a pas répondu. Aucune conclusion ne peut être tirée : relancer avant toute analyse.</div>';
+  if (ag.sansA1.length)
+    corps += '<div class="encadre enc-carmin"><b>Sitadel indisponible — à retraiter :</b> ' + ag.sansA1.map(ech).join(', ') + '. Aucune conclusion sur ces parcelles.</div>';
+  if (ag.indisponibles.length)
+    corps += '<div class="encadre enc-carmin"><b>Réponse Sitadel incomplète — à retraiter.</b>Jeux non interrogés : ' + ag.indisponibles.map(ech).join(', ') + '.</div>';
+
+  if (!ag.autorisations.length && !ag.sansA1.length) {
+    corps += '<div class="encadre enc-orange"><b>Aucune autorisation trouvée dans Sitadel.</b>' +
+      'Cela signifie seulement : pas de PC, PA, PD ni de DP créant un logement ou de la surface, <i>accordé depuis 2013</i>, rattaché ' + (g.unite ? 'aux parcelles de l\'unité' : 'à cette parcelle') + '. ' +
+      'Les DP mineures, le pré-2013 et les refus sont hors du champ de la source. ' +
+      '<b>→ Pièce à obtenir : relevé des autorisations auprès de la mairie.</b></div>';
   } else {
-    nbAutor = rA1.autorisations.length;
-    if (rA1.indisponibles.length)
-      corps += '<div class="encadre enc-carmin"><b>Réponse incomplète — parcelle à retraiter.</b>Jeux non interrogés : ' + rA1.indisponibles.map(ech).join(', ') + '.</div>';
-    if (!nbAutor) {
-      corps += '<div class="encadre enc-orange"><b>Aucune autorisation trouvée dans Sitadel.</b>' +
-        'Cela signifie seulement : pas de PC, PA, PD ni de DP créant un logement ou de la surface, <i>accordé depuis 2013</i>, rattaché à cette parcelle. ' +
-        'Les DP mineures, le pré-2013 et les refus sont hors du champ de la source. ' +
-        '<b>→ Pièce à obtenir : relevé des autorisations auprès de la mairie.</b></div>';
-    } else {
-      corps += rA1.autorisations.map(carteAutor).join('');
+    for (const v of ag.autorisations) {
+      corps += carteAutor(v.au);
+      if (g.unite)
+        corps += '<div style="margin:-8px 0 12px 4px;font-size:12.5px;color:var(--canard)"><b>Parcelles de l\'unité couvertes :</b> ' + v.couvertes.map(ech).join(', ') + '</div>';
     }
   }
 
   /* ===== AXE A3 ===== */
-  corps += '<div class="soustitre"><span class="slash">/</span> Bâti réel contre bâti déclaré <span style="font-size:11px;color:var(--bleugris);font-weight:400">(plan cadastral vs BD TOPO)</span></div>';
+  corps += '<div class="soustitre"><span class="slash">/</span> Bâti réel contre bâti déclaré <span style="font-size:11px;color:var(--bleugris);font-weight:400">(plan cadastral vs BD TOPO' + (g.unite ? ' — agrégé sur l\'unité' : '') + ')</span></div>';
 
-  if (!rA3 || rA3.erreur) {
-    corps += '<div class="encadre enc-carmin"><b>Emprises indisponibles — parcelle à retraiter.</b>' +
-      (rA3 && rA3.erreur ? ech(rA3.erreur) + '. ' : '') + 'La comparaison d\'emprises n\'a pas pu être faite.</div>';
-  } else {
-    const A = rA3.cadastre.total, B = rA3.topo.total;
-    const ecart = A > 0 ? (B - A) / A : null;
+  if (ag.erreursA3.length)
+    corps += '<div class="encadre enc-carmin"><b>Emprises indisponibles — à retraiter :</b> ' + ag.erreursA3.map(ech).join(', ') + '.</div>';
 
+  if (ag.parcs.length) {
+    const A = ag.A, B = ag.B, ecart = ag.ecart;
     corps += '<div class="a3bloc">';
     corps += '<div class="a3chiffres">' +
-      chiffre(fm2(rA3.aireParcelle), 'contenance graphique de la parcelle') +
-      chiffre(fm2(A), 'emprise bâtie au plan cadastral (' + rA3.cadastre.nb + ' bât.)') +
-      chiffre(fm2(B), 'emprise bâtie BD TOPO — photogrammétrie (' + rA3.topo.nb + ' bât.)') +
+      chiffre(fm2(ag.aire), 'contenance graphique ' + (g.unite ? 'de l\'unité (' + ag.parcs.length + ' parcelles)' : 'de la parcelle')) +
+      chiffre(fm2(A), 'emprise bâtie au plan cadastral (' + ag.nbCad + ' bât.)') +
+      chiffre(fm2(B), 'emprise bâtie BD TOPO — photogrammétrie (' + ag.nbTopo + ' bât.)') +
       (ecart !== null ? chiffre((ecart >= 0 ? '+' : '') + (ecart * 100).toFixed(1) + ' %', 'écart (B − A) / A — seuil provisoire 5 %') : '') +
       '</div>';
+
+    if (g.unite) {
+      corps += '<table class="batitable"><tr><th>Parcelle</th><th>Contenance</th><th>Emprise cadastre</th><th>Emprise BD TOPO</th><th>Écart</th></tr>';
+      for (const pc of ag.parcs)
+        corps += '<tr><td><b>' + ech(pc.label) + '</b></td><td>' + fm2(pc.aire) + '</td><td>' + fm2(pc.A) + '</td><td>' + fm2(pc.B) + '</td><td>' +
+          (pc.ecart !== null ? (pc.ecart >= 0 ? '+' : '') + (pc.ecart * 100).toFixed(1) + ' %' : '—') + '</td></tr>';
+      corps += '</table><div style="height:8px"></div>';
+    }
 
     // Verdict — formulation imposée par la note MARTEAU du 27/07 : constat, jamais qualification
     if (B < SURFACE_MIN && A < SURFACE_MIN) {
       corps += '<div class="a3ecart ras">Pas de bâti significatif détecté (sous ' + SURFACE_MIN + ' m²)</div>';
     } else if (A < SURFACE_MIN && B >= SURFACE_MIN) {
       corps += '<div class="encadre enc-orange"><b>Alerte forte — à instruire.</b>Une emprise bâtie de ' + fm2(B) +
-        ' est visible en photogrammétrie alors que le plan cadastral ne porte pas de bâti significatif sur la parcelle. ' +
+        ' est visible en photogrammétrie alors que le plan cadastral ne porte pas de bâti significatif. ' +
         'Constat à instruire au regard des autorisations d\'urbanisme et de la déclaration au service du cadastre — deux polices distinctes.</div>';
     } else if (ecart !== null && ecart > SEUIL_ECART) {
       corps += '<div class="encadre enc-orange"><b>À instruire.</b>Emprise bâtie photogrammétrique supérieure de ' +
@@ -973,24 +1064,25 @@ function fiche(p, rA1, rA3){
       corps += '<div class="a3ecart ras">Écart dans la tolérance — rien à signaler à ce stade</div>';
     }
 
-    // Croisement A1 × A3
-    if (ecart !== null && ecart > SEUIL_ECART && rA1) {
-      const recentes = rA1.autorisations.filter(a => (a.dates.autorisation || '') >= '2020');
-      if (!nbAutor) {
+    // Croisement A1 × A3 — au niveau du groupe
+    if (ecart !== null && ecart > SEUIL_ECART && !ag.sansA1.length) {
+      const recentes = ag.autorisations.filter(v => (v.au.dates.autorisation || '') >= '2020');
+      if (!ag.autorisations.length) {
         corps += '<div class="encadre enc-carmin"><b>Croisement A1 × A3.</b>Écart d\'emprise au-delà du seuil <b>et</b> aucune autorisation dans Sitadel depuis 2013. ' +
           'Si le bâti excédentaire est récent et exigeait un permis, l\'exclusion du 5° de l\'art. L. 421-9 peut faire obstacle à la régularisation. ' +
           '<b>Vérification en mairie indispensable</b> (DP mineures et pré-2013 hors champ de Sitadel).</div>';
       } else if (recentes.length) {
         corps += '<div class="encadre enc-canard"><b>Croisement A1 × A3.</b>Une autorisation récente figure dans Sitadel (' +
-          ech(recentes[0].numero) + ') : l\'écart peut relever du simple décalage de millésime entre la construction et sa portée au plan. À rapprocher des surfaces autorisées.</div>';
+          ech(recentes[0].au.numero) + ') : l\'écart peut relever du simple décalage de millésime entre la construction et sa portée au plan. À rapprocher des surfaces autorisées.</div>';
       }
     }
 
     // Bâtiments BD TOPO — indices de datation
-    if (rA3.topo.batiments.length) {
-      corps += '<table class="batitable"><tr><th>Bâtiment (BD TOPO)</th><th>Emprise sur parcelle</th><th>Hauteur</th><th>Usage</th><th>Date d\'apparition*</th></tr>';
-      rA3.topo.batiments.slice(0, 8).forEach((b, i) => {
-        corps += '<tr><td>n° ' + (i+1) + (b.etat && b.etat !== 'En service' ? ' — ' + ech(b.etat) : '') + '</td>' +
+    if (ag.batiments.length) {
+      corps += '<table class="batitable"><tr>' + (g.unite ? '<th>Parcelle</th>' : '') + '<th>Bâtiment (BD TOPO)</th><th>Emprise sur parcelle</th><th>Hauteur</th><th>Usage</th><th>Date d\'apparition*</th></tr>';
+      ag.batiments.slice(0, 12).forEach((b, i) => {
+        corps += '<tr>' + (g.unite ? '<td><b>' + ech(b.parcelle) + '</b></td>' : '') +
+          '<td>n° ' + (i+1) + (b.etat && b.etat !== 'En service' ? ' — ' + ech(b.etat) : '') + '</td>' +
           '<td>' + fm2(b.aire) + '</td>' +
           '<td>' + (b.hauteur ? ech(b.hauteur) + ' m' : '—') + '</td>' +
           '<td>' + (b.usage ? ech(b.usage) : '—') + '</td>' +
@@ -1000,7 +1092,7 @@ function fiche(p, rA1, rA3){
     }
     corps += '</div>';
 
-    // Carte : parcelle + fonds (plan / ortho / ortho 1950-65 = antériorité)
+    // Carte : l'unité entière + fonds (plan / ortho / ortho 1950-65 = antériorité)
     const idCarte = 'carte' + (++numCarte);
     corps += '<div class="fonds" id="fonds-' + idCarte + '">' +
       '<button data-fond="plan" class="actif">Plan IGN</button>' +
@@ -1008,11 +1100,12 @@ function fiche(p, rA1, rA3){
       '<button data-fond="histo">Photo aérienne 1950-65</button>' +
       '<span style="font-size:11px;color:var(--bleugris);align-self:center">— comparer 1950-65 / aujourd\'hui : antériorité grossière du bâti</span></div>';
     corps += '<div class="carte" id="' + idCarte + '"></div>';
-    cartesEnAttente.push({ id: idCarte, parcelle: rA3.parcelle });
+    cartesEnAttente.push({ id: idCarte, parcelles: ag.geos });
   }
 
-  const compte = (rA1 ? nbAutor + ' autorisation' + (nbAutor > 1 ? 's' : '') : '?') +
-    (rA3 && !rA3.erreur ? ' · ' + rA3.topo.nb + ' bât. photogrammétrie' : '');
+  const compte = ag.autorisations.length + ' autorisation' + (ag.autorisations.length > 1 ? 's' : '') +
+    (g.unite ? ' · ' + ag.parcs.length + ' parcelles' : '') +
+    (ag.parcs.length ? ' · ' + ag.nbTopo + ' bât. photogrammétrie' : '');
   return '<section class="fiche"><div class="entete"><span class="serif">' + titre + '</span>' +
     '<span class="compte">' + compte + '</span></div><div class="corps">' + corps + '</div></section>';
 }
@@ -1075,7 +1168,9 @@ function initCarte(cfg){
     histo: coucheWMTS('ORTHOIMAGERY.ORTHOPHOTOS.1950-1965', 'image/png')
   };
   const map = L.map(cfg.id, { layers: [fonds.plan], scrollWheelZoom: false });
-  const contour = L.geoJSON(cfg.parcelle, { style: { color: '#A01040', weight: 2.5, fillColor: '#A01040', fillOpacity: 0.07 } }).addTo(map);
+  const geos = cfg.parcelles || [cfg.parcelle];
+  const contour = L.geoJSON({ type: 'FeatureCollection', features: geos },
+    { style: { color: '#A01040', weight: 2.5, fillColor: '#A01040', fillOpacity: 0.07 } }).addTo(map);
   map.fitBounds(contour.getBounds().pad(0.6));
   let actuel = 'plan';
   function setFond(nom){
@@ -1143,7 +1238,8 @@ function anneauxDe(g){
   return [];
 }
 
-async function carteExportImage(parcelle, fond, voisins){
+async function carteExportImage(geos, fond, voisins){
+  const fcParcelles = { type: 'FeatureCollection', features: geos };
   const atelier = document.getElementById('atelier');
   atelier.innerHTML = '<div id="atelier-carte" style="width:640px;height:640px"></div>';
   const couche = coucheWMTS(fond.couche, fond.format);
@@ -1152,7 +1248,7 @@ async function carteExportImage(parcelle, fond, voisins){
   // puis on dessine les contours nous-mêmes sur l'image, aux coordonnées de la carte.
   const map = L.map('atelier-carte', { layers: [couche], zoomControl: false, attributionControl: false,
                                        fadeAnimation: false, zoomAnimation: false });
-  map.fitBounds(L.geoJSON(parcelle).getBounds().pad(0.35), { maxZoom: 18 });
+  map.fitBounds(L.geoJSON(fcParcelles).getBounds().pad(0.35), { maxZoom: 18 });
   // attendre le chargement des tuiles (filet à 3 s pour les zones lentes)
   await new Promise(res => { let fini = false;
     const ok = () => { if (!fini) { fini = true; setTimeout(res, 300); } };
@@ -1181,18 +1277,20 @@ async function carteExportImage(parcelle, fond, voisins){
     if (voisins && voisins.length && fond.nom !== 'histo')
       for (const f of voisins)
         tracer(f, { trait: fond.nom === 'ortho' ? 'rgba(255,255,255,0.85)' : 'rgba(58,58,58,0.85)', epaisseur: 1 });
-    tracer(parcelle, { trait: '#A01040', epaisseur: 3.5, remplir: 'rgba(160,16,64,0.06)' }); // carmin — cohérence REDPAR
+    for (const geo of geos)
+      tracer(geo, { trait: '#A01040', epaisseur: 3.5, remplir: 'rgba(160,16,64,0.06)' }); // carmin — cohérence REDPAR
     img = { data: cv.toDataURL('image/png'), w: cv.width, h: cv.height };
   } catch(e) { /* tuiles non capturables : vignette absente, export poursuivi */ }
   map.remove(); atelier.innerHTML = '';
   return img;
 }
 
-async function captureTroisFonds(parcelle){
-  const voisins = await EMPRISES.parcellesVoisines(parcelle);
+async function captureTroisFonds(geos){
+  const fc = { type: 'FeatureCollection', features: geos };
+  const voisins = await EMPRISES.parcellesVoisines(fc);
   const images = [];
   for (const f of FONDS_EXPORT) {
-    const img = await carteExportImage(parcelle, f, voisins);
+    const img = await carteExportImage(geos, f, voisins);
     if (img) images.push({ libelle: f.libelle, img });
   }
   return images;
@@ -1207,32 +1305,54 @@ const pdfTxt = s => String(s)
 const fnum = n => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 
 // Prépare la matière d'export d'une analyse : chiffres A3 + lignes de texte
-function matiereExport(a){
-  const m = { titre: a.p.nom + ' — ' + a.p.section.toUpperCase() + ' ' + String(parseInt(a.p.numero,10)),
-              chiffres: [], constat: null, constatNiveau: 'ras', lignesA1: [] };
-  if (a.rA3 && !a.rA3.erreur) {
-    const A = a.rA3.cadastre.total, B = a.rA3.topo.total;
-    const ec = A > 0 ? (B - A) / A : null;
+function matiereExport(g){
+  const ag = agreger(g);
+  const m = { titre: ag.titre, ag, chiffres: [], parcLignes: [], constat: null, constatNiveau: 'ras',
+              croisement: null, lignesA1: [], batLignes: [] };
+
+  if (ag.parcs.length) {
+    const A = ag.A, B = ag.B, ec = ag.ecart;
     m.chiffres = [
-      { val: fnum(a.rA3.aireParcelle) + ' m²', lib: 'contenance graphique de la parcelle' },
-      { val: fnum(A) + ' m²', lib: 'emprise bâtie au plan cadastral (' + a.rA3.cadastre.nb + ' bât.)' },
-      { val: fnum(B) + ' m²', lib: 'emprise bâtie BD TOPO — photogrammétrie (' + a.rA3.topo.nb + ' bât.)' }
+      { val: fnum(ag.aire) + ' m²', lib: 'contenance graphique ' + (g.unite ? "de l'unité (" + ag.parcs.length + ' parcelles)' : 'de la parcelle') },
+      { val: fnum(A) + ' m²', lib: 'emprise bâtie au plan cadastral (' + ag.nbCad + ' bât.)' },
+      { val: fnum(B) + ' m²', lib: 'emprise bâtie BD TOPO — photogrammétrie (' + ag.nbTopo + ' bât.)' }
     ];
     if (ec !== null) m.chiffres.push({ val: (ec >= 0 ? '+' : '') + (ec * 100).toFixed(1) + ' %', lib: 'écart (B - A) / A — seuil provisoire 5 %' });
+    if (g.unite)
+      for (const pc of ag.parcs)
+        m.parcLignes.push(pc.label + ' : ' + fnum(pc.aire) + ' m² · cadastre ' + fnum(pc.A) + ' m² · BD TOPO ' + fnum(pc.B) + ' m²' +
+          (pc.ecart !== null ? ' · ' + (pc.ecart >= 0 ? '+' : '') + (pc.ecart * 100).toFixed(1) + ' %' : ''));
     if (B < SURFACE_MIN && A < SURFACE_MIN) { m.constat = 'Pas de bâti significatif détecté.'; }
     else if (A < SURFACE_MIN && B >= SURFACE_MIN) { m.constat = 'Emprise bâtie visible en photogrammétrie sans bâti significatif au plan cadastral — à instruire au regard des autorisations d’urbanisme et de la déclaration au service du cadastre.'; m.constatNiveau = 'vigilance'; }
     else if (ec !== null && ec > SEUIL_ECART) { m.constat = 'Emprise photogrammétrique supérieure de ' + (ec * 100).toFixed(1) + ' % à celle du plan cadastral (seuil provisoire 5 %, non calibré) — à instruire.'; m.constatNiveau = 'vigilance'; }
     else { m.constat = 'Écart dans la tolérance — rien à signaler à ce stade.'; }
+    // croisement A1 × A3, au niveau du groupe
+    if (ec !== null && ec > SEUIL_ECART && !ag.sansA1.length) {
+      const recentes = ag.autorisations.filter(v => (v.au.dates.autorisation || '') >= '2020');
+      if (!ag.autorisations.length)
+        m.croisement = { t: "Croisement A1 × A3 : écart au-delà du seuil ET aucune autorisation Sitadel depuis 2013 — si le bâti excédentaire est récent et exigeait un permis, l'exclusion du 5° de l'art. L. 421-9 peut faire obstacle à la régularisation. Vérification en mairie indispensable.", niv: 'erreur' };
+      else if (recentes.length)
+        m.croisement = { t: 'Croisement A1 × A3 : une autorisation récente figure dans Sitadel (' + recentes[0].au.numero + ") — l'écart peut relever du décalage de millésime. À rapprocher des surfaces autorisées.", niv: 'note' };
+    }
+    for (const b of ag.batiments.slice(0, 12))
+      m.batLignes.push((g.unite ? b.parcelle + ' · ' : '') + Math.round(b.aire) + ' m²' + (b.hauteur ? ' · h. ' + b.hauteur + ' m' : '') +
+        (b.usage ? ' · ' + b.usage : '') + (b.apparition ? ' · apparu ' + fdate(String(b.apparition).slice(0,10)) : '') +
+        (b.etat && b.etat !== 'En service' ? ' · ' + b.etat : ''));
   } else {
-    m.constat = 'Emprises indisponibles — parcelle à retraiter.'; m.constatNiveau = 'erreur';
+    m.constat = 'Emprises indisponibles — à retraiter' + (ag.erreursA3.length ? ' (' + ag.erreursA3.join(', ') + ')' : '') + '.';
+    m.constatNiveau = 'erreur';
   }
-  if (!a.rA1) m.lignesA1.push({ t: 'Sitadel indisponible — parcelle à retraiter.', niv: 'erreur' });
-  else if (!a.rA1.autorisations.length) {
+
+  if (ag.sansA1.length) m.lignesA1.push({ t: 'Sitadel indisponible — à retraiter : ' + ag.sansA1.join(', ') + '.', niv: 'erreur' });
+  if (ag.indisponibles.length) m.lignesA1.push({ t: 'Réponse Sitadel incomplète (' + ag.indisponibles.join(', ') + ') — à retraiter.', niv: 'erreur' });
+  if (!ag.autorisations.length && !ag.sansA1.length) {
     m.lignesA1.push({ t: 'Aucune autorisation trouvée dans Sitadel.', niv: 'vigilance' });
     m.lignesA1.push({ t: 'Cela signifie seulement : pas de PC, PA, PD ni de DP créant un logement ou de la surface, accordé depuis 2013. Les DP mineures, le pré-2013 et les refus sont hors du champ de la source. Pièce à obtenir : relevé des autorisations en mairie.', niv: 'note' });
   } else {
-    for (const au of a.rA1.autorisations) {
+    for (const v of ag.autorisations) {
+      const au = v.au;
       m.lignesA1.push({ t: au.type + ' ' + au.numero + ' — ' + au.etat + (au.dates.autorisation ? ' le ' + fdate(au.dates.autorisation) : au.anneeDepot ? ' (dépôt ' + au.anneeDepot + ')' : ''), niv: 'titre' });
+      if (g.unite) m.lignesA1.push({ niv: 'paire', label: "Parcelles de l'unité couvertes", val: v.couvertes.join(', ') });
       const paires = [];
       if (au.nature) paires.push(['Nature', au.nature]);
       if (au.surfaces.habCreee) paires.push(['Surface habitation créée', au.surfaces.habCreee + ' m²']);
@@ -1240,7 +1360,7 @@ function matiereExport(a){
       if (au.dates.chantier) paires.push(['Ouverture de chantier', fdate(au.dates.chantier)]);
       paires.push(['DAACT', au.dates.daact ? fdate(au.dates.daact) : 'non renseignée dans Sitadel']);
       if (au.indicateurs.length) paires.push(['Annexes / travaux', au.indicateurs.join(', ')]);
-      if (au.parcelles.length > 1) paires.push(['Parcelles de l\'autorisation', au.parcelles.map(x => (x.section||'?') + ' ' + (x.numero||'?')).join(', ')]);
+      if (au.parcelles.length > 1) paires.push(["Parcelles de l'autorisation", au.parcelles.map(x => (x.section||'?') + ' ' + (x.numero||'?')).join(', ')]);
       if (au.demandeur.nom) paires.push(['Demandeur', au.demandeur.nom + (au.demandeur.siren ? ' (SIREN ' + au.demandeur.siren + ')' : '')]);
       for (const px of paires) m.lignesA1.push({ niv: 'paire', label: px[0], val: px[1] });
       if (!au.dates.daact) {
@@ -1249,7 +1369,7 @@ function matiereExport(a){
         m.lignesA1.push({ t: 'Vigilance : DAACT non retrouvée — pièce à obtenir.' +
           (ageAut ? ' Autorisation délivrée ' + ageAut : '') +
           (ageDoc ? ', chantier ouvert ' + ageDoc : '') + '.' +
-          ' Rappel : les délais courent de l\'achèvement des travaux (prescriptions) et de la réception de la DAACT en mairie (contestation, R. 462-6 C. urb.) — non de la délivrance de l\'autorisation.', niv: 'vigilance' });
+          " Rappel : les délais courent de l'achèvement des travaux (prescriptions) et de la réception de la DAACT en mairie (contestation, R. 462-6 C. urb.) — non de la délivrance de l'autorisation.", niv: 'vigilance' });
       }
     }
   }
@@ -1259,32 +1379,30 @@ function matiereExport(a){
 /* Synthèse des points d'attention et alertes de toutes les parcelles analysées (page 1 des exports) */
 function pointsAttention(){
   const pts = [];
-  for (const a of ANALYSES) {
-    const titre = a.p.nom + ' ' + a.p.section.toUpperCase() + ' ' + String(parseInt(a.p.numero,10));
-    if (!a.rA1) pts.push({ n: 'carmin', p: titre, t: 'Sitadel indisponible — parcelle à retraiter.' });
-    else if (a.rA1.indisponibles && a.rA1.indisponibles.length)
-      pts.push({ n: 'carmin', p: titre, t: 'Réponse Sitadel incomplète (' + a.rA1.indisponibles.join(', ') + ') — à retraiter.' });
-    if (!a.rA3 || a.rA3.erreur) {
-      pts.push({ n: 'carmin', p: titre, t: 'Emprises indisponibles — comparaison du bâti non faite.' });
-    } else {
-      const A = a.rA3.cadastre.total, B = a.rA3.topo.total;
-      const ec = A > 0 ? (B - A) / A : null;
+  for (const g of GROUPES) {
+    const ag = agreger(g);
+    const titre = g.unite ? ag.commune + ' — ' + g.etiquette + ' (' + ag.refs.join(', ') + ')' : ag.commune + ' ' + ag.refs[0];
+    if (ag.sansA1.length) pts.push({ n: 'carmin', p: titre, t: 'Sitadel indisponible (' + ag.sansA1.join(', ') + ') — à retraiter.' });
+    if (ag.indisponibles.length) pts.push({ n: 'carmin', p: titre, t: 'Réponse Sitadel incomplète (' + ag.indisponibles.join(', ') + ') — à retraiter.' });
+    if (ag.erreursA3.length) pts.push({ n: 'carmin', p: titre, t: 'Emprises indisponibles (' + ag.erreursA3.join(', ') + ') — comparaison du bâti non faite.' });
+    if (ag.parcs.length) {
+      const A = ag.A, B = ag.B, ec = ag.ecart;
       if (A < SURFACE_MIN && B >= SURFACE_MIN)
-        pts.push({ n: 'carmin', p: titre, t: 'Bâti visible en photogrammétrie (' + fnum(B) + ' m²) sans bâti significatif au plan cadastral — à instruire.' });
+        pts.push({ n: 'carmin', p: titre, t: 'Bâti visible en photogrammétrie (' + fnum(B) + " m²) sans bâti significatif au plan cadastral — à instruire." });
       else if (ec !== null && ec > SEUIL_ECART) {
-        if (a.rA1 && !a.rA1.autorisations.length)
-          pts.push({ n: 'carmin', p: titre, t: 'Écart d\'emprise de +' + (ec * 100).toFixed(1) + ' % sans aucune autorisation Sitadel — vérification en mairie indispensable.' });
+        if (!ag.autorisations.length && !ag.sansA1.length)
+          pts.push({ n: 'carmin', p: titre, t: "Écart d'emprise de +" + (ec * 100).toFixed(1) + ' % sans aucune autorisation Sitadel — vérification en mairie indispensable.' });
         else
-          pts.push({ n: 'orange', p: titre, t: 'Écart d\'emprise de +' + (ec * 100).toFixed(1) + ' % (seuil provisoire 5 %) — à instruire.' });
+          pts.push({ n: 'orange', p: titre, t: "Écart d'emprise de +" + (ec * 100).toFixed(1) + ' % (seuil provisoire 5 %) — à instruire.' });
       }
       // bâti significatif sans aucune autorisation retrouvée : relevé mairie à obtenir
-      // (sauf si une alerte carmin couvre déjà cette parcelle : écart hors seuil ou bâti sans plan)
-      if (B >= SURFACE_MIN && a.rA1 && !a.rA1.autorisations.length
+      if (B >= SURFACE_MIN && !ag.autorisations.length && !ag.sansA1.length
           && !(ec !== null && ec > SEUIL_ECART) && !(A < SURFACE_MIN && B >= SURFACE_MIN))
         pts.push({ n: 'orange', p: titre, t: 'Bâti présent, aucune autorisation dans Sitadel (pré-2013 et DP mineures hors champ) — relevé des autorisations en mairie à obtenir.' });
     }
-    if (a.rA1) for (const au of a.rA1.autorisations)
-      if (!au.dates.daact) {
+    for (const v of ag.autorisations)
+      if (!v.au.dates.daact) {
+        const au = v.au;
         const ageAut = anciennete(au.dates.autorisation, au.anneeDepot);
         const ageDoc = anciennete(au.dates.chantier, null);
         pts.push({ n: 'orange', p: titre, t: 'DAACT non retrouvée pour ' + au.type + ' ' + au.numero +
@@ -1334,8 +1452,8 @@ $('expPdf').onclick = async () => {
     pdf.text('Autorisations d\'urbanisme et bâti réel par parcelle — ' + dateJour(), GX, 20);
     {
       const lignes = lignesRecap();
-      const cols = [ { t:'Commune', x:GX, w:60 }, { t:'Section', x:GX+62, w:18 }, { t:'N°', x:GX+82, w:14 },
-                     { t:'Lieu-dit', x:GX+98, w:56 }, { t:'Contenance', x:GX+156, w:30 } ];
+      const cols = [ { t:'Commune', x:GX, w:52 }, { t:'Section', x:GX+54, w:16 }, { t:'N°', x:GX+71, w:13 },
+                     { t:'Lieu-dit', x:GX+85, w:50 }, { t:'Contenance', x:GX+137, w:28 }, { t:'Unité', x:GX+168, w:20 } ];
       let ty = 38;
       pdf.setFillColor(...NUIT); pdf.rect(GX-2, ty-5, 190, 7.5, 'F');
       pdf.setFont('helvetica','bold'); pdf.setFontSize(8.5); pdf.setTextColor(255,255,255);
@@ -1347,11 +1465,12 @@ $('expPdf').onclick = async () => {
         if (alt) { pdf.setFillColor(244,245,247); pdf.rect(GX-2, ty-4.6, 190, 6.6, 'F'); }
         alt = !alt;
         pdf.setFont('helvetica','normal'); pdf.setFontSize(8.5); pdf.setTextColor(...NOIR);
-        pdf.text(pdfTxt(l.commune).slice(0,42), cols[0].x, ty);
+        pdf.text(pdfTxt(l.commune).slice(0,36), cols[0].x, ty);
         pdf.text(l.section, cols[1].x, ty);
         pdf.text(l.numero, cols[2].x, ty);
-        pdf.text(pdfTxt(l.lieuDit).slice(0,38), cols[3].x, ty);
+        pdf.text(pdfTxt(l.lieuDit).slice(0,33), cols[3].x, ty);
         pdf.text(l.contenance ? fnum(l.contenance) + ' m2' : '—', cols[4].x, ty);
+        pdf.text(l.unite, cols[5].x, ty);
         ty += 6.6;
       }
       if (lignes.some(l => /\*$/.test(l.lieuDit))) {
@@ -1411,8 +1530,8 @@ $('expPdf').onclick = async () => {
       }
     }
 
-    for (let i = 0; i < ANALYSES.length; i++) {
-      const a = ANALYSES[i], m = matiereExport(a);
+    for (let i = 0; i < GROUPES.length; i++) {
+      const g = GROUPES[i], m = matiereExport(g);
       pdf.addPage();
 
       // bandeau titre + filet ocre
@@ -1424,9 +1543,9 @@ $('expPdf').onclick = async () => {
       pdf.text('TRAVAUX — ' + dateJour(), 198, 13, { align: 'right' });
 
       // ------- colonne gauche : LES TROIS CARTES carrées (plan / photo actuelle / photo 1950-65) -------
-      if (a.rA3 && !a.rA3.erreur && a.rA3.parcelle) {
-        btn.textContent = 'Génération… cartes ' + (i + 1) + '/' + ANALYSES.length;
-        const images = await captureTroisFonds(a.rA3.parcelle);
+      if (m.ag.geos.length) {
+        btn.textContent = 'Génération… cartes ' + (i + 1) + '/' + GROUPES.length;
+        const images = await captureTroisFonds(m.ag.geos);
         let gy = 28;
         for (const im of images) {
           const iw = GW, ih = iw * im.img.h / im.img.w; // carré : ≈ 56 × 56 mm
@@ -1469,6 +1588,13 @@ $('expPdf').onclick = async () => {
         pdf.text(pdfTxt('— ' + c.lib), DX + 30, dy);
         dy += 6.5;
       }
+      // détail par parcelle (unités foncières)
+      for (const pl of m.parcLignes) {
+        pdf.setFont('helvetica','normal'); pdf.setFontSize(7.8); pdf.setTextColor(...NOIR);
+        if (dy > 280) { pdf.addPage(); dy = 20; }
+        pdf.text(pdfTxt(pl), DX, dy);
+        dy += 3.6;
+      }
       dy += 3;
 
       // grille libellé / valeur (deux colonnes)
@@ -1510,12 +1636,10 @@ $('expPdf').onclick = async () => {
       // 3 — bâti réel contre bâti déclaré
       bandeauSection('3 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO');
       encadrePDF(m.constat, m.constatNiveau);
-      if (a.rA3 && !a.rA3.erreur && a.rA3.topo.batiments.length) {
-        ecrire('Bâtiments BD TOPO sur la parcelle :', { taille: 8.5, gras: true, coul: NUIT, avant: 2 });
-        a.rA3.topo.batiments.slice(0, 8).forEach((b, j) => {
-          ecrire('n° ' + (j+1) + ' — ' + Math.round(b.aire) + ' m²' + (b.hauteur ? ' · h. ' + b.hauteur + ' m' : '') +
-            (b.usage ? ' · ' + b.usage : '') + (b.apparition ? ' · apparu ' + fdate(String(b.apparition).slice(0,10)) : ''), { taille: 8, coul: NOIR });
-        });
+      if (m.croisement) encadrePDF(m.croisement.t, m.croisement.niv === 'erreur' ? 'erreur' : 'ras');
+      if (m.batLignes.length) {
+        ecrire('Bâtiments BD TOPO ' + (g.unite ? "sur l'unité :" : 'sur la parcelle :'), { taille: 8.5, gras: true, coul: NUIT, avant: 2 });
+        m.batLignes.forEach((bl, j) => ecrire('n° ' + (j+1) + ' — ' + bl, { taille: 8, coul: NOIR }));
         ecrire('Date d’apparition BD TOPO : indice de datation, pas preuve.', { taille: 7.5, italique: true, coul: GRIS });
       }
 
@@ -1559,14 +1683,14 @@ $('expWord').onclick = async () => {
     }));
     {
       const lignes = lignesRecap();
-      const enTete = ['Commune', 'Section', 'N°', 'Lieu-dit', 'Contenance'];
+      const enTete = ['Commune', 'Section', 'N°', 'Lieu-dit', 'Contenance', 'Unité'];
       const rangs = [ new D.TableRow({ tableHeader: true, children: enTete.map(t =>
         new D.TableCell({ shading: { fill: NUIT }, children: [P(T(t, { bold: true, color: 'FFFFFF', size: 18 }))] })) }) ];
       lignes.forEach((l, k) => {
         const fond = k % 2 ? 'F4F5F7' : 'FFFFFF';
         rangs.push(new D.TableRow({ children: [
           l.commune, l.section, l.numero, l.lieuDit,
-          l.contenance ? fnum(l.contenance) + ' m²' : '—'
+          l.contenance ? fnum(l.contenance) + ' m²' : '—', l.unite
         ].map(v => new D.TableCell({ shading: { fill: fond }, children: [P(T(String(v), { size: 18 }))] })) }));
       });
       enfants.push(new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, rows: rangs }));
@@ -1603,19 +1727,19 @@ $('expWord').onclick = async () => {
       enfants.push(P(T(RESERVES_EXPORT, { size: 14, italics: true, color: GRIS }), { spacing: { before: 240 } }));
     }
 
-    for (let i = 0; i < ANALYSES.length; i++) {
-      const a = ANALYSES[i], m = matiereExport(a);
+    for (let i = 0; i < GROUPES.length; i++) {
+      const g = GROUPES[i], m = matiereExport(g);
 
-      // titre de page (une page par parcelle, après la page récapitulative)
+      // titre de page (une page par unité foncière ou parcelle isolée)
       enfants.push(P(T(m.titre, { size: 36, bold: true, color: NUIT }),
         { spacing: { after: 60 }, pageBreakBefore: true }));
       enfants.push(P(T('TRAVAUX — fiche du ' + dateJour(), { size: 16, color: GRIS }), { spacing: { after: 160 } }));
 
       // ------- colonne gauche : LES TROIS CARTES carrées (plan / photo actuelle / photo 1950-65) -------
       const gauche = [];
-      if (a.rA3 && !a.rA3.erreur && a.rA3.parcelle) {
-        btn.textContent = 'Génération… cartes ' + (i + 1) + '/' + ANALYSES.length;
-        const images = await captureTroisFonds(a.rA3.parcelle);
+      if (m.ag.geos.length) {
+        btn.textContent = 'Génération… cartes ' + (i + 1) + '/' + GROUPES.length;
+        const images = await captureTroisFonds(m.ag.geos);
         for (const im of images) {
           const b64 = im.img.data.split(',')[1];
           const bin = atob(b64); const oct = new Uint8Array(bin.length);
@@ -1642,6 +1766,8 @@ $('expWord').onclick = async () => {
           T('  — ' + c.lib, { size: 15, color: GRIS })
         ], { spacing: { after: 40 } }));
       }
+      for (const pl of m.parcLignes)
+        droite.push(P(T(pl, { size: 16, color: NOIR }), { spacing: { after: 20 } }));
       droite.push(bandeauW('2 · AUTORISATIONS D’URBANISME — SITADEL (DEPUIS 2013)'));
       for (const l of m.lignesA1) {
         if (l.niv === 'titre')          droite.push(P(T(l.t, { bold: true, color: NUIT }), { spacing: { before: 100 } }));
@@ -1657,12 +1783,11 @@ $('expWord').onclick = async () => {
         spacing: { after: 100 },
         children: [ new D.TextRun({ text: ' ' + m.constat, font: 'Segoe UI', size: 20, bold: true, color: NUIT }) ]
       }));
-      if (a.rA3 && !a.rA3.erreur && a.rA3.topo.batiments.length) {
-        droite.push(P(T('Bâtiments BD TOPO sur la parcelle :', { size: 18, bold: true, color: NUIT }), { spacing: { before: 100 } }));
-        a.rA3.topo.batiments.slice(0, 8).forEach((b, j) => {
-          droite.push(P(T('n° ' + (j+1) + ' — ' + Math.round(b.aire) + ' m²' + (b.hauteur ? ' · h. ' + b.hauteur + ' m' : '') +
-            (b.usage ? ' · ' + b.usage : '') + (b.apparition ? ' · apparu ' + fdate(String(b.apparition).slice(0,10)) : ''), { size: 17 })));
-        });
+      if (m.croisement)
+        droite.push(P(T(m.croisement.t, { size: 17, bold: m.croisement.niv === 'erreur', color: m.croisement.niv === 'erreur' ? CARMIN : CANARD }), { spacing: { after: 80 } }));
+      if (m.batLignes.length) {
+        droite.push(P(T('Bâtiments BD TOPO ' + (g.unite ? 'sur l’unité :' : 'sur la parcelle :'), { size: 18, bold: true, color: NUIT }), { spacing: { before: 100 } }));
+        m.batLignes.forEach((bl, j) => droite.push(P(T('n° ' + (j+1) + ' — ' + bl, { size: 17 }))));
         droite.push(P(T('Date d’apparition BD TOPO : indice de datation, pas preuve.', { size: 15, italics: true, color: GRIS })));
       }
 
