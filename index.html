@@ -212,9 +212,10 @@
   <div class="filet">
     <b>Limites — axe A1 (Sitadel)</b> : autorisations antérieures à 2013, DP ne créant ni logement ni surface (piscines, clôtures, ravalements, abris), demandes refusées ou en cours, au-delà de trois parcelles par autorisation — hors du champ de la source.
     <b>Une absence de ligne est une question à poser en mairie, jamais une conclusion.</b><br>
-    <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.<br>
+    <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.
+    <b>Géoréférencement</b> : certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l'orthophoto (calage feuille par feuille du PCI) — un contour qui semble déporté sur la photo n'est pas une anomalie de la parcelle ; comparer les formes, pas la superposition.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v6.6</b>
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v6.7</b>
   </div>
 </footer>
 
@@ -1258,7 +1259,7 @@ const DELAIS_EXPORT = [
   'Déclaration fiscale (art. 1406 CGI) : 90 jours de la réalisation définitive — police distincte de l\'urbanisme.'
 ];
 
-const RESERVES_EXPORT = 'Réserves : Sitadel ne couvre ni le pré-2013, ni les DP sans création de surface, ni les refus — une absence de ligne est une question à poser en mairie, jamais une conclusion. Plan cadastral (murs) et photogrammétrie (débords compris) ne mesurent pas la même chose : écart de quelques % structurel ; seuil de 5 % provisoire, non calibré. Un écart se présente « à instruire », jamais comme une irrégularité. Document de travail interne — ne fait pas foi de la régularité des constructions. Sources : SDES / data.gouv.fr, IGN Géoplateforme (Licence Ouverte).';
+const RESERVES_EXPORT = 'Réserves : Sitadel ne couvre ni le pré-2013, ni les DP sans création de surface, ni les refus — une absence de ligne est une question à poser en mairie, jamais une conclusion. Plan cadastral (murs) et photogrammétrie (débords compris) ne mesurent pas la même chose : écart de quelques % structurel ; seuil de 5 % provisoire, non calibré. Un écart se présente « à instruire », jamais comme une irrégularité. Certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l\'orthophoto (calage du PCI feuille par feuille) : un contour visuellement déporté sur la photo n\'est pas une anomalie — comparer les formes, pas la superposition. Document de travail interne — ne fait pas foi de la régularité des constructions. Sources : SDES / data.gouv.fr, IGN Géoplateforme (Licence Ouverte).';
 
 /* ----- PDF : UNE PAGE PAR PARCELLE — chiffres en colonne à gauche (carte dessous), texte à droite ----- */
 $('expPdf').onclick = async () => {
