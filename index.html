@@ -591,6 +591,21 @@ async function devinerCommune(texte){
   const tete = texte.slice(0, 1200);
   const norm = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/gi, '').toLowerCase();
   const geo = async p => { try { const r = await (await fetch('https://geo.api.gouv.fr/communes?' + p + '&fields=code,nom&limit=2')).json(); return Array.isArray(r) ? r : []; } catch { return []; } };
+  // en-tête SPDC réel (extrait modèle 1) : « Département : 059 … Commune : NOM 009 »
+  // — le département est sur 3 chiffres et le code commune SUIT le nom (constaté sur pièce le 20/08)
+  const mSpdc = tete.match(/D[eé]partement\s*:?\s*0?(\d{2})\d?\b[\s\S]{0,80}?Commune\s*:?\s*([A-ZÀ-Ý][A-ZÀ-Ý' -]*?)\s*(\d{3})\b/i);
+  if (mSpdc) {
+    const insee = mSpdc[1] + mSpdc[3];
+    const cs = await geo('code=' + insee);
+    if (cs.length) return cs[0];
+    const anc = await communeAncienne(insee);
+    if (anc) return anc;
+    // repli : le nom en clair, validé par concordance ou par alignement sur le code commune
+    const csN = await geo('nom=' + encodeURIComponent(mSpdc[2].trim()) + '&boost=population&limit=5');
+    for (const c of csN)
+      if (norm(c.nom) === norm(mSpdc[2]) || c.code.slice(-3) === mSpdc[3]) return c;
+  }
+
   // « DEP », « DÉP », « Département »… et le code commune à 3 chiffres
   const mDep = tete.match(/D[EÉ]P[A-ZÉ]*\D{0,10}?(\d{2})\b/i);
   const mCom = tete.match(/\bCOM(?:MUNE)?\D{0,12}?(\d{3})\b/i);
