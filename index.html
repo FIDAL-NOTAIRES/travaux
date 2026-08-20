@@ -215,7 +215,7 @@
     <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.
     <b>Géoréférencement</b> : certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l'orthophoto (calage feuille par feuille du PCI) — un contour qui semble déporté sur la photo n'est pas une anomalie de la parcelle ; comparer les formes, pas la superposition.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v6.9</b>
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v6.10</b>
   </div>
 </footer>
 
@@ -1159,8 +1159,12 @@ async function carteExportImage(parcelle, fond, voisins){
     couche.once('load', ok); setTimeout(ok, 3000); });
   let img = null;
   try {
-    const cv = await html2canvas(document.getElementById('atelier-carte'), { useCORS: true, scale: 2, logging: false });
+    const cvTuiles = await html2canvas(document.getElementById('atelier-carte'), { useCORS: true, scale: 2, logging: false });
+    // canvas NEUF pour le dessin : celui d'html2canvas garde des transformations et découpages
+    // résiduels qui rendent tout tracé ultérieur invisible (vérifié au banc d'essai le 20/08)
+    const cv = document.createElement('canvas'); cv.width = cvTuiles.width; cv.height = cvTuiles.height;
     const ctx = cv.getContext('2d');
+    ctx.drawImage(cvTuiles, 0, 0);
     const k = cv.width / 640; // échelle de capture
     const tracer = (geo, style) => {
       for (const anneau of anneauxDe(geo)) {
