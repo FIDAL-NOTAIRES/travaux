@@ -1037,8 +1037,8 @@ $('expPdf').onclick = async () => {
         }
       }
 
-      // ------- colonne droite : chiffres puis texte -------
-      let dy = 30;
+      // ------- colonne droite : trois sections numérotées, chacune sous son bandeau -------
+      let dy = 28;
       const ecrire = (texte, opts) => {
         const o = Object.assign({ taille: 9, gras: false, coul: NOIR, avant: 0, italique: false }, opts || {});
         dy += o.avant;
@@ -1049,8 +1049,17 @@ $('expPdf').onclick = async () => {
         pdf.text(lignes, DX, dy);
         dy += lignes.length * (o.taille * 0.42) + 1.5;
       };
+      // bandeau de section : fond canard, texte blanc — structure lisible d'un coup d'œil
+      const bandeauSection = (texte) => {
+        if (dy > 265) { pdf.addPage(); dy = 20; }
+        pdf.setFillColor(...CANARD); pdf.rect(DX - 3, dy - 1, DW + 6, 7.5, 'F');
+        pdf.setFont('helvetica','bold'); pdf.setFontSize(9.5); pdf.setTextColor(255,255,255);
+        pdf.text(pdfTxt(texte), DX, dy + 4);
+        dy += 11;
+      };
 
-      // les chiffres, en tête de colonne de droite
+      // 1 — valeurs clés
+      bandeauSection('1 · VALEURS CLÉS');
       for (const c of m.chiffres) {
         pdf.setFont('helvetica','bold'); pdf.setFontSize(13); pdf.setTextColor(...NUIT);
         pdf.text(pdfTxt(c.val), DX, dy);
@@ -1058,9 +1067,10 @@ $('expPdf').onclick = async () => {
         pdf.text(pdfTxt('— ' + c.lib), DX + 30, dy);
         dy += 6.5;
       }
-      dy += 2;
+      dy += 3;
 
-      ecrire('/ Autorisations d’urbanisme (Sitadel, depuis 2013)', { taille: 11, gras: true, coul: CANARD, avant: 2 });
+      // 2 — autorisations
+      bandeauSection('2 · AUTORISATIONS D\'URBANISME — SITADEL (DEPUIS 2013)');
       for (const l of m.lignesA1) {
         if (l.niv === 'titre')      ecrire(l.t, { gras: true, coul: NUIT, avant: 2 });
         else if (l.niv === 'detail') ecrire(l.t, { taille: 8, coul: NOIR });
@@ -1068,8 +1078,10 @@ $('expPdf').onclick = async () => {
         else if (l.niv === 'erreur') ecrire(l.t, { gras: true, coul: CARMIN });
         else ecrire(l.t, { taille: 8, italique: true, coul: GRIS });
       }
+      dy += 3;
 
-      ecrire('/ Bâti réel contre bâti déclaré (plan cadastral vs BD TOPO)', { taille: 11, gras: true, coul: CANARD, avant: 5 });
+      // 3 — bâti réel contre bâti déclaré
+      bandeauSection('3 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO');
       ecrire(m.constat, { gras: true, coul: m.constatNiveau === 'vigilance' ? ORANGE : m.constatNiveau === 'erreur' ? CARMIN : CANARD, avant: 1 });
       if (a.rA3 && !a.rA3.erreur && a.rA3.topo.batiments.length) {
         ecrire('Bâtiments BD TOPO sur la parcelle :', { taille: 8.5, gras: true, coul: NUIT, avant: 2 });
@@ -1150,15 +1162,21 @@ $('expWord').onclick = async () => {
       }
       if (!gauche.length) gauche.push(P(T('—', { color: GRIS })));
 
-      // ------- colonne droite : chiffres puis texte -------
+      // ------- colonne droite : trois sections numérotées, chacune sous son bandeau canard -------
+      const bandeauW = texte => new D.Paragraph({
+        shading: { fill: CANARD },
+        spacing: { before: 200, after: 100 },
+        children: [ new D.TextRun({ text: '  ' + texte, font: 'Segoe UI', size: 20, bold: true, color: 'FFFFFF' }) ]
+      });
       const droite = [];
+      droite.push(bandeauW('1 · VALEURS CLÉS'));
       for (const c of m.chiffres) {
         droite.push(P([
           T(c.val, { size: 26, bold: true, color: NUIT }),
           T('  — ' + c.lib, { size: 15, color: GRIS })
         ], { spacing: { after: 40 } }));
       }
-      droite.push(P(T('/ Autorisations d’urbanisme (Sitadel, depuis 2013)', { size: 24, bold: true, color: CANARD }), { spacing: { before: 160, after: 80 } }));
+      droite.push(bandeauW('2 · AUTORISATIONS D’URBANISME — SITADEL (DEPUIS 2013)'));
       for (const l of m.lignesA1) {
         if (l.niv === 'titre')          droite.push(P(T(l.t, { bold: true, color: NUIT }), { spacing: { before: 100 } }));
         else if (l.niv === 'detail')    droite.push(P(T(l.t, { size: 17 })));
@@ -1166,7 +1184,7 @@ $('expWord').onclick = async () => {
         else if (l.niv === 'erreur')    droite.push(P(T(l.t, { bold: true, color: CARMIN })));
         else                            droite.push(P(T(l.t, { size: 17, italics: true, color: GRIS })));
       }
-      droite.push(P(T('/ Bâti réel contre bâti déclaré (plan cadastral vs BD TOPO)', { size: 24, bold: true, color: CANARD }), { spacing: { before: 200, after: 80 } }));
+      droite.push(bandeauW('3 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO'));
       droite.push(P(T(m.constat, { bold: true, color: m.constatNiveau === 'vigilance' ? ORANGE : m.constatNiveau === 'erreur' ? CARMIN : CANARD })));
       if (a.rA3 && !a.rA3.erreur && a.rA3.topo.batiments.length) {
         droite.push(P(T('Bâtiments BD TOPO sur la parcelle :', { size: 18, bold: true, color: NUIT }), { spacing: { before: 100 } }));
