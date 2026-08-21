@@ -215,7 +215,7 @@
     <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.
     <b>Géoréférencement</b> : certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l'orthophoto (calage feuille par feuille du PCI) — un contour qui semble déporté sur la photo n'est pas une anomalie de la parcelle ; comparer les formes, pas la superposition.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v7.4</b>
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v8.0</b>
   </div>
 </footer>
 
@@ -445,6 +445,82 @@ const EMPRISES = (() => {
   }
 
   return { emprisesPourParcelle, parcellesVoisines };
+})();
+
+/* ---------- 2 bis. MODULE RÉGIME (axe A2) — seul endroit qui connaît le GPU ----------
+   Géoportail de l'urbanisme via API Carto (sans clé, CORS-OK — mêmes canaux qu'URBA) :
+   municipality (RNU), document opposable, zone-urba, assiette-sup-s (servitudes).
+   Contrat neutre ; échec explicite « régime indisponible — à retraiter ».
+   Leçon du 21/08 (testé sur Noordpeene C 752) : un sommet du polygone peut porter sur la
+   commune VOISINE (limite communale) — municipality et document s'interrogent donc sur un
+   POINT INTÉRIEUR (turf.pointOnFeature) ; zones et servitudes sur la géométrie entière,
+   car elles peuvent traverser la parcelle. Géorisques écarté : l'API v2 exige une clé,
+   la v1 ignore le filtre commune (constaté le 21/08) — le canal SUP du GPU suffit en v1. */
+const REGIME = (() => {
+  const GPU = 'https://apicarto.ign.fr/api/gpu/';
+  // File d'attente : 2 requêtes en parallèle (roadmap URBA : ménager API Carto en lot)
+  let actifs = 0; const attente = [];
+  const passer = () => { while (actifs < 2 && attente.length) { const t = attente.shift(); actifs++;
+    t.fn().then(t.res, t.rej).finally(() => { actifs--; passer(); }); } };
+  const enFile = fn => new Promise((res, rej) => { attente.push({ fn, res, rej }); passer(); });
+
+  async function couche(nom, geom){
+    const r = await fetch(GPU + nom + '?geom=' + encodeURIComponent(JSON.stringify(geom)));
+    if (!r.ok) throw new Error('GPU ' + nom + ' HTTP ' + r.status);
+    return (await r.json()).features || [];
+  }
+
+  // Caches par commune : les parcelles d'une même commune partagent RNU et document
+  // (leçon URBA « mutualisation »). Une promesse rejetée est retirée pour permettre le retry.
+  const cacheMun = new Map(), cacheDoc = new Map();
+  const parCommune = (cache, insee, fabrique) => {
+    if (!cache.has(insee)) cache.set(insee, fabrique().catch(e => { cache.delete(insee); throw e; }));
+    return cache.get(insee);
+  };
+
+  const TYPEZONE = { U: 'zone urbaine', AU: 'zone à urbaniser', A: 'zone agricole', N: 'zone naturelle' };
+
+  async function regimePourParcelle(parcelle, insee){
+    const pt = turf.pointOnFeature(parcelle).geometry; // point intérieur garanti
+    const geom = parcelle.geometry || parcelle;
+    const [mun, docs, zones, sups] = await Promise.all([
+      parCommune(cacheMun, insee, () => enFile(() => couche('municipality', pt))),
+      parCommune(cacheDoc, insee, () => enFile(() => couche('document', pt))),
+      enFile(() => couche('zone-urba', geom)),
+      enFile(() => couche('assiette-sup-s', geom))
+    ]);
+    const documents = []; const dVus = new Set();
+    for (const d of docs) {
+      const p = d.properties || {};
+      const cle = (p.du_type || '?') + '|' + (p.grid_title || p.nom || '?');
+      if (dVus.has(cle)) continue; dVus.add(cle);
+      documents.push({ type: p.du_type || '?', titre: p.grid_title || p.nom || '?' });
+    }
+    const zonesN = []; const zVus = new Set();
+    for (const z of zones) {
+      const p = z.properties || {};
+      const cle = (p.libelle || '?') + '|' + (p.partition || '');
+      if (zVus.has(cle)) continue; zVus.add(cle);
+      zonesN.push({ libelle: p.libelle || '?', libelong: p.libelong || '',
+                    typezone: (p.typezone || '').toUpperCase(),
+                    nature: TYPEZONE[(p.typezone || '').toUpperCase()] || '' });
+    }
+    const supsN = []; const sVus = new Set();
+    for (const s of sups) {
+      const p = s.properties || {};
+      const type = String(p.suptype || '?').toUpperCase();
+      const cle = type + '|' + (p.nomsuplitt || p.nomass || '?');
+      if (sVus.has(cle)) continue; sVus.add(cle);
+      supsN.push({ type, nom: p.nomsuplitt || p.nomass || '?', assiette: p.typeass || '' });
+    }
+    return {
+      rnu: mun.length ? !!(mun[0].properties || {}).is_rnu : null,
+      documents, zones: zonesN, sups: supsN,
+      pm1: supsN.some(s => s.type.startsWith('PM1'))
+    };
+  }
+
+  return { regimePourParcelle };
 })();
 
 /* ---------- 3. SAISIE — liste multi-communes (accroche large → validation fine) ---------- */
@@ -953,7 +1029,23 @@ function agreger(g){
     r.topo.batiments.forEach(b => batiments.push(Object.assign({ parcelle: refLabel(it.p) }, b)));
   }
   batiments.sort((x, y) => y.aire - x.aire);
-  return { commune, refs, titre, autorisations, indisponibles: [...indisponibles], sansA1,
+  // Axe A2 — agrégat du régime d'urbanisme sur le groupe (dédoublonné, zones avec parcelles)
+  const regime = { rnu: null, documents: [], zones: [], sups: [], pm1: false, erreurs: [] };
+  { const dV = new Set(), zV = new Map(), sV = new Set();
+    for (const it of items) {
+      const r2 = it.rA2;
+      if (!r2 || r2.erreur) { regime.erreurs.push(refLabel(it.p)); continue; }
+      if (r2.rnu !== null) regime.rnu = regime.rnu === null ? r2.rnu : (regime.rnu || r2.rnu);
+      r2.documents.forEach(d => { const k = d.type + '|' + d.titre; if (!dV.has(k)) { dV.add(k); regime.documents.push(d); } });
+      r2.zones.forEach(z => { const k = z.libelle;
+        if (!zV.has(k)) zV.set(k, Object.assign({}, z, { parcs: [] }));
+        zV.get(k).parcs.push(refLabel(it.p)); });
+      r2.sups.forEach(s => { const k = s.type + '|' + s.nom; if (!sV.has(k)) { sV.add(k); regime.sups.push(s); } });
+      if (r2.pm1) regime.pm1 = true;
+    }
+    regime.zones = [...zV.values()];
+  }
+  return { commune, refs, titre, autorisations, indisponibles: [...indisponibles], sansA1, regime,
            aire, contenance, A, B, nbCad, nbTopo, ecart: A > 0 ? (B - A) / A : null,
            erreursA3, parcs, batiments, geos, lieuxDits: [...lieuxDits],
            prefixes: [...new Set(items.map(x => x.p.prefixe).filter(x => x && x !== '000'))] };
@@ -977,7 +1069,13 @@ $('lancer').onclick = async () => {
       SITADEL.autorisationsPourParcelle(ref).catch(() => null),
       EMPRISES.emprisesPourParcelle(ref).catch(e => ({ erreur: e.message }))
     ]);
-    ANALYSES.push({ p, rA1, rA3 });
+    // Axe A2 — régime d'urbanisme (GPU) : nécessite la géométrie ramenée par l'axe A3
+    let rA2;
+    if (rA3 && !rA3.erreur && rA3.parcelle) {
+      $('chargetxt').textContent = 'Analyse — ' + p.nom + ' ' + p.section + ' ' + p.numero + ' (' + n + '/' + parcelles.length + ') : régime d\'urbanisme (GPU)…';
+      rA2 = await REGIME.regimePourParcelle(rA3.parcelle, p.insee).catch(e => ({ erreur: e.message }));
+    } else rA2 = { erreur: 'géométrie de la parcelle indisponible' };
+    ANALYSES.push({ p, rA1, rA3, rA2 });
   }
   // phase 2 — constituer les unités foncières (contiguïté, convention REDPAR)
   $('chargetxt').textContent = 'Constitution des unités foncières…';
@@ -1032,6 +1130,32 @@ function fiche(g){
     corps += '<div class="encadre enc-canard"><b>Unité foncière (' + g.etiquette + ') — ' + ag.parcs.length + ' parcelles contiguës.</b>' +
       'Fiche commune : autorisations dédupliquées sur l\'ensemble, emprises agrégées, détail par parcelle ci-dessous. ' +
       'Convention REDPAR : l\'unité réunit ce qui se touche — retirer une parcelle de la liste l\'en sort.</div>';
+
+  /* ===== AXE A2 — régime d'urbanisme ===== */
+  const rg = ag.regime;
+  corps += '<div class="soustitre"><span class="slash">/</span> Régime d\'urbanisme <span style="font-size:11px;color:var(--bleugris);font-weight:400">(Géoportail de l\'urbanisme — documents téléversés uniquement)</span></div>';
+  if (rg.erreurs.length)
+    corps += '<div class="encadre enc-carmin"><b>Régime d\'urbanisme indisponible (GPU) — à retraiter :</b> ' + rg.erreurs.map(ech).join(', ') + '.</div>';
+  if (rg.documents.length || rg.zones.length || rg.sups.length || rg.rnu !== null) {
+    if (rg.rnu === true)
+      corps += '<div class="encadre enc-gris"><b>Commune au règlement national d\'urbanisme (RNU)</b> — pas de document local opposable ; les autorisations relèvent du régime national.</div>';
+    if (rg.documents.length)
+      corps += '<div style="margin:2px 0 8px 4px;font-size:13.5px"><b>Document opposable :</b> ' + rg.documents.map(d => ech(d.type) + ' — ' + ech(d.titre)).join(' · ') + (rg.documents.length > 1 ? ' <span style="color:var(--carmin);font-weight:700">(plusieurs documents : parcelle en limite de partition, à vérifier)</span>' : '') + '</div>';
+    for (const z of rg.zones)
+      corps += '<div style="margin:2px 0 6px 4px;font-size:13.5px"><b>Zone ' + ech(z.libelle) + '</b>' + (z.nature ? ' <span style="color:var(--bleugris)">(' + ech(z.nature) + ')</span>' : '') + (z.libelong ? ' — ' + ech(z.libelong) : '') + (g.unite && z.parcs.length < ag.parcs.length ? ' <span style="color:var(--canard)">[' + z.parcs.map(ech).join(', ') + ']</span>' : '') + '</div>';
+    if (!rg.zones.length && rg.rnu === false && !rg.erreurs.length)
+      corps += '<div style="margin:2px 0 6px 4px;font-size:13.5px;color:var(--bleugris)">Aucun zonage téléversé au GPU pour cette parcelle — règlement à vérifier en mairie.</div>';
+    if (rg.sups.length) {
+      const aff = rg.sups.slice(0, 8);
+      corps += '<div style="margin:6px 0 6px 4px;font-size:13px"><b>Servitudes d\'utilité publique sur ' + (g.unite ? 'l\'unité' : 'la parcelle') + ' :</b> ' +
+        aff.map(s => ech(s.type) + ' — ' + ech(s.nom)).join(' · ') + (rg.sups.length > 8 ? ' · +' + (rg.sups.length - 8) + ' autres' : '') + '</div>';
+    }
+    if (rg.pm1)
+      corps += '<div class="encadre enc-orange"><b>Servitude PM1 — plan de prévention des risques sur ' + (g.unite ? 'l\'unité' : 'la parcelle') + '.</b>' +
+        'Si la construction se trouve dans une zone du 1° du II de l\'art. L. 562-1 C. env. (zones les plus exposées du plan), ' +
+        'l\'exception du 6° de l\'art. L. 421-9 C. urb. écarte la prescription administrative décennale. ' +
+        'Le GPU ne donne que l\'assiette de la servitude : <b>le zonage réglementaire du plan (mairie ou Géorisques) dit si la parcelle est en zone exposée</b>.</div>';
+  }
 
   /* ===== AXE A1 ===== */
   corps += '<div class="soustitre"><span class="slash">/</span> Autorisations d\'urbanisme <span style="font-size:11px;color:var(--bleugris);font-weight:400">(Sitadel, depuis 2013' + (g.unite ? ' — chaque autorisation une seule fois, avec les parcelles couvertes' : '') + ')</span></div>';
@@ -1347,7 +1471,31 @@ const fnum = n => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
 function matiereExport(g){
   const ag = agreger(g);
   const m = { titre: ag.titre, ag, chiffres: [], parcLignes: [], constat: null, constatNiveau: 'ras',
-              croisement: null, lignesA1: [], batLignes: [] };
+              croisement: null, lignesA1: [], lignesA2: [], batLignes: [] };
+
+  // ----- axe A2 : régime d'urbanisme (GPU) -----
+  { const rg = ag.regime;
+    if (rg.erreurs.length)
+      m.lignesA2.push({ t: 'Régime d\'urbanisme indisponible (GPU) — à retraiter : ' + rg.erreurs.join(', ') + '.', niv: 'erreur' });
+    if (rg.rnu === true)
+      m.lignesA2.push({ t: 'Commune au règlement national d\'urbanisme (RNU) — pas de document local opposable.', niv: 'titre' });
+    if (rg.documents.length)
+      m.lignesA2.push({ niv: 'paire', label: 'Document opposable', val: rg.documents.map(d => d.type + ' — ' + d.titre).join(' · ') +
+        (rg.documents.length > 1 ? ' (plusieurs documents : parcelle en limite de partition, à vérifier)' : '') });
+    for (const z of rg.zones)
+      m.lignesA2.push({ niv: 'paire', label: 'Zone ' + z.libelle + (z.nature ? ' (' + z.nature + ')' : ''),
+        val: (z.libelong || '—') + (g.unite && z.parcs.length < ag.parcs.length ? ' [' + z.parcs.join(', ') + ']' : '') });
+    if (!rg.zones.length && rg.rnu === false && !rg.erreurs.length)
+      m.lignesA2.push({ t: 'Aucun zonage téléversé au GPU pour cette parcelle — règlement à vérifier en mairie.', niv: 'note' });
+    if (rg.sups.length)
+      m.lignesA2.push({ niv: 'paire', label: 'Servitudes (SUP)', val: rg.sups.slice(0, 8).map(s => s.type + ' — ' + s.nom).join(' · ') +
+        (rg.sups.length > 8 ? ' · +' + (rg.sups.length - 8) + ' autres' : '') });
+    if (rg.pm1)
+      m.lignesA2.push({ t: 'Servitude PM1 (plan de prévention des risques) : si la construction est en zone du 1° du II de l\'art. L. 562-1 C. env., ' +
+        'l\'exception du 6° de l\'art. L. 421-9 C. urb. écarte la prescription administrative décennale — zonage réglementaire du plan à vérifier (mairie ou Géorisques).', niv: 'vigilance' });
+    if (!m.lignesA2.length)
+      m.lignesA2.push({ t: 'Aucune donnée d\'urbanisme téléversée au GPU pour cette parcelle.', niv: 'note' });
+  }
 
   if (ag.parcs.length) {
     const A = ag.A, B = ag.B, ec = ag.ecart;
@@ -1443,6 +1591,14 @@ function pointsAttention(){
           && !(ec !== null && ec > SEUIL_ECART) && !(A < SURFACE_MIN && B >= SURFACE_MIN))
         pts.push({ n: 'orange', p: titre, t: 'Bâti présent, aucune autorisation dans Sitadel (pré-2013 et DP mineures hors champ) — relevé des autorisations en mairie à obtenir.' });
     }
+    // Axe A2 — régime d'urbanisme
+    if (ag.regime.erreurs.length)
+      pts.push({ n: 'carmin', p: titre, t: 'Régime d\'urbanisme indisponible (GPU) — à retraiter : ' + ag.regime.erreurs.join(', ') + '.' });
+    if (ag.regime.pm1)
+      pts.push({ n: 'orange', p: titre, t: 'Servitude PM1 (plan de prévention des risques) sur ' + (g.unite ? 'l\'unité' : 'la parcelle') +
+        ' — si la construction est en zone du 1° du II de L. 562-1 C. env., l\'exception 6° de L. 421-9 écarte la prescription administrative. Zonage réglementaire du plan à vérifier.' });
+    if (ag.regime.documents.length > 1)
+      pts.push({ n: 'orange', p: titre, t: 'Plusieurs documents d\'urbanisme retournés par le GPU (limite de partition) — document opposable à confirmer.' });
     for (const v of ag.autorisations)
       if (v.au.dates.daact) {
         const dl = delaiR4626(v.au.dates.daact);
@@ -1474,7 +1630,7 @@ const DELAIS_EXPORT = [
   'Déclaration fiscale (art. 1406 CGI) : 90 jours de la réalisation définitive — police distincte de l\'urbanisme.'
 ];
 
-const RESERVES_EXPORT = 'Réserves : Sitadel ne couvre ni le pré-2013, ni les DP sans création de surface, ni les refus — une absence de ligne est une question à poser en mairie, jamais une conclusion. Plan cadastral (murs) et photogrammétrie (débords compris) ne mesurent pas la même chose : écart de quelques % structurel ; seuil de 5 % provisoire, non calibré. Un écart se présente « à instruire », jamais comme une irrégularité. Certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l\'orthophoto (calage du PCI feuille par feuille) : un contour visuellement déporté sur la photo n\'est pas une anomalie — comparer les formes, pas la superposition. Document de travail interne — ne fait pas foi de la régularité des constructions. Sources : SDES / data.gouv.fr, IGN Géoplateforme (Licence Ouverte).';
+const RESERVES_EXPORT = 'Réserves : Sitadel ne couvre ni le pré-2013, ni les DP sans création de surface, ni les refus — une absence de ligne est une question à poser en mairie, jamais une conclusion. Plan cadastral (murs) et photogrammétrie (débords compris) ne mesurent pas la même chose : écart de quelques % structurel ; seuil de 5 % provisoire, non calibré. Un écart se présente « à instruire », jamais comme une irrégularité. Certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l\'orthophoto (calage du PCI feuille par feuille) : un contour visuellement déporté sur la photo n\'est pas une anomalie — comparer les formes, pas la superposition. Le Géoportail de l\'urbanisme ne contient que les documents et servitudes téléversés par les autorités compétentes : l\'absence d\'une servitude (notamment PPRN) n\'y vaut jamais absence de servitude — le règlement et ses annexes en mairie font foi. Document de travail interne — ne fait pas foi de la régularité des constructions. Sources : SDES / data.gouv.fr, IGN Géoplateforme et Géoportail de l\'urbanisme (Licence Ouverte).';
 
 /* ----- PDF : UNE PAGE PAR PARCELLE — chiffres en colonne à gauche (carte dessous), texte à droite ----- */
 $('expPdf').onclick = async () => {
@@ -1686,8 +1842,19 @@ $('expPdf').onclick = async () => {
         dy += h + 2.5;
       };
 
-      // 2 — autorisations
-      bandeauSection('2 · AUTORISATIONS D\'URBANISME — SITADEL (DEPUIS 2013)');
+      // 2 — régime d'urbanisme (axe A2)
+      bandeauSection('2 · RÉGIME D\'URBANISME — GÉOPORTAIL DE L\'URBANISME');
+      for (const l of m.lignesA2) {
+        if (l.niv === 'titre')      ecrire(l.t, { gras: true, coul: NUIT, avant: 2 });
+        else if (l.niv === 'paire') paire(l.label, l.val);
+        else if (l.niv === 'vigilance') ecrire(l.t, { taille: 8.5, gras: true, coul: ORANGE, avant: 1 });
+        else if (l.niv === 'erreur') ecrire(l.t, { gras: true, coul: CARMIN });
+        else ecrire(l.t, { taille: 8, italique: true, coul: GRIS });
+      }
+      dy += 3;
+
+      // 3 — autorisations
+      bandeauSection('3 · AUTORISATIONS D\'URBANISME — SITADEL (DEPUIS 2013)');
       for (const l of m.lignesA1) {
         if (l.niv === 'titre')      ecrire(l.t, { gras: true, coul: NUIT, avant: 2 });
         else if (l.niv === 'paire') paire(l.label, l.val);
@@ -1697,8 +1864,8 @@ $('expPdf').onclick = async () => {
       }
       dy += 3;
 
-      // 3 — bâti réel contre bâti déclaré
-      bandeauSection('3 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO');
+      // 4 — bâti réel contre bâti déclaré
+      bandeauSection('4 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO');
       encadrePDF(m.constat, m.constatNiveau);
       if (m.croisement) encadrePDF(m.croisement.t, m.croisement.niv === 'erreur' ? 'erreur' : 'ras');
       if (m.batLignes.length) {
@@ -1832,7 +1999,15 @@ $('expWord').onclick = async () => {
       }
       for (const pl of m.parcLignes)
         droite.push(P(T(pl, { size: 16, color: NOIR }), { spacing: { after: 20 } }));
-      droite.push(bandeauW('2 · AUTORISATIONS D’URBANISME — SITADEL (DEPUIS 2013)'));
+      droite.push(bandeauW('2 · RÉGIME D’URBANISME — GÉOPORTAIL DE L’URBANISME'));
+      for (const l of m.lignesA2) {
+        if (l.niv === 'titre')          droite.push(P(T(l.t, { bold: true, color: NUIT }), { spacing: { before: 100 } }));
+        else if (l.niv === 'paire')     droite.push(P([ T(l.label + '  ', { size: 17, color: GRIS }), T(String(l.val), { size: 17, color: NOIR }) ]));
+        else if (l.niv === 'vigilance') droite.push(P(T(l.t, { size: 18, bold: true, color: ORANGE }), { spacing: { before: 60 } }));
+        else if (l.niv === 'erreur')    droite.push(P(T(l.t, { bold: true, color: CARMIN })));
+        else                            droite.push(P(T(l.t, { size: 17, italics: true, color: GRIS })));
+      }
+      droite.push(bandeauW('3 · AUTORISATIONS D’URBANISME — SITADEL (DEPUIS 2013)'));
       for (const l of m.lignesA1) {
         if (l.niv === 'titre')          droite.push(P(T(l.t, { bold: true, color: NUIT }), { spacing: { before: 100 } }));
         else if (l.niv === 'paire')     droite.push(P([ T(l.label + '  ', { size: 17, color: GRIS }), T(String(l.val), { size: 17, color: NOIR }) ]));
@@ -1840,7 +2015,7 @@ $('expWord').onclick = async () => {
         else if (l.niv === 'erreur')    droite.push(P(T(l.t, { bold: true, color: CARMIN })));
         else                            droite.push(P(T(l.t, { size: 17, italics: true, color: GRIS })));
       }
-      droite.push(bandeauW('3 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO'));
+      droite.push(bandeauW('4 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO'));
       droite.push(new D.Paragraph({
         shading: { fill: m.constatNiveau === 'vigilance' ? 'FFF4E7' : m.constatNiveau === 'erreur' ? 'F8E9EE' : 'EAF3F4' },
         border: { left: { style: D.BorderStyle.SINGLE, size: 24, color: m.constatNiveau === 'vigilance' ? 'FF982D' : m.constatNiveau === 'erreur' ? CARMIN : CANARD } },
