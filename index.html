@@ -215,7 +215,7 @@
     <b>Limites — axe A3 (emprises)</b> : le plan cadastral trace l'emprise des murs, la photogrammétrie saisit ce que voit l'avion, débords de toiture compris — un écart de quelques pour cent est structurel. Décalage de millésime possible entre les deux sources. <b>Seuil de 5 % provisoire, non calibré</b> — ne pas opposer à un client avant calibrage sur parcelles connues. Un écart se présente « à instruire », jamais comme une irrégularité. La date d'apparition BD TOPO est partiellement d'origine fiscale : indice, pas preuve.
     <b>Géoréférencement</b> : certaines feuilles du plan cadastral sont décalées de plusieurs mètres par rapport à l'orthophoto (calage feuille par feuille du PCI) — un contour qui semble déporté sur la photo n'est pas une anomalie de la parcelle ; comparer les formes, pas la superposition.<br>
     Cette fiche est un document de travail interne ; elle ne fait pas foi de la régularité des constructions.
-    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v8.0</b>
+    Données : SDES / data.gouv.fr et IGN Géoplateforme, Licence Ouverte. <b>TRAVAUX v8.1</b>
   </div>
 </footer>
 
@@ -1235,6 +1235,20 @@ function fiche(g){
       }
     }
 
+    // Croisements A2 × A3 — l'écart replacé dans le régime d'urbanisme (registre : constat)
+    const ecartSignif = (ecart !== null && ecart > SEUIL_ECART) || (A < SURFACE_MIN && B >= SURFACE_MIN);
+    const zonesAN = ag.regime.zones.length && ag.regime.zones.every(z => z.typezone === 'A' || z.typezone === 'N');
+    if (ecartSignif && zonesAN) {
+      corps += '<div class="encadre enc-orange"><b>Croisement A2 × A3.</b>L\'écart d\'emprise se situe en ' +
+        ag.regime.zones.map(z => 'zone ' + ech(z.libelle) + (z.nature ? ' (' + ech(z.nature) + ')' : '')).join(', ') +
+        ' : la constructibilité y est restreinte et une régularisation éventuelle s\'apprécie au regard du règlement de la zone — à instruire en priorité.</div>';
+    }
+    if (ecartSignif && ag.regime.pm1) {
+      corps += '<div class="encadre enc-orange"><b>Croisement A2 × A3.</b>L\'écart d\'emprise se situe dans l\'assiette d\'une servitude PM1 (plan de prévention des risques) : ' +
+        'si le bâti excédentaire est en zone du 1° du II de l\'art. L. 562-1 C. env., l\'exception du 6° de l\'art. L. 421-9 C. urb. écarte la prescription administrative — ' +
+        '<b>vérification du zonage réglementaire du plan prioritaire</b>.</div>';
+    }
+
     // Bâtiments BD TOPO — indices de datation
     if (ag.batiments.length) {
       corps += '<table class="batitable"><tr>' + (g.unite ? '<th>Parcelle</th>' : '') + '<th>Bâtiment (BD TOPO)</th><th>Emprise sur parcelle</th><th>Hauteur</th><th>Usage</th><th>Date d\'apparition*</th></tr>';
@@ -1471,7 +1485,7 @@ const fnum = n => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
 function matiereExport(g){
   const ag = agreger(g);
   const m = { titre: ag.titre, ag, chiffres: [], parcLignes: [], constat: null, constatNiveau: 'ras',
-              croisement: null, lignesA1: [], lignesA2: [], batLignes: [] };
+              croisement: null, croisA2: [], lignesA1: [], lignesA2: [], batLignes: [] };
 
   // ----- axe A2 : régime d'urbanisme (GPU) -----
   { const rg = ag.regime;
@@ -1521,6 +1535,15 @@ function matiereExport(g){
       else if (recentes.length)
         m.croisement = { t: 'Croisement A1 × A3 : une autorisation récente figure dans Sitadel (' + recentes[0].au.numero + ") — l'écart peut relever du décalage de millésime. À rapprocher des surfaces autorisées.", niv: 'note' };
     }
+    // croisements A2 × A3 (zone et servitudes du régime d'urbanisme)
+    const ecartSignifX = (ec !== null && ec > SEUIL_ECART) || (A < SURFACE_MIN && B >= SURFACE_MIN);
+    const zonesANX = ag.regime.zones.length && ag.regime.zones.every(z => z.typezone === 'A' || z.typezone === 'N');
+    if (ecartSignifX && zonesANX)
+      m.croisA2.push("Croisement A2 × A3 : l'écart d'emprise se situe en " +
+        ag.regime.zones.map(z => 'zone ' + z.libelle + (z.nature ? ' (' + z.nature + ')' : '')).join(', ') +
+        " — constructibilité restreinte, régularisation éventuelle à apprécier au regard du règlement de la zone. À instruire en priorité.");
+    if (ecartSignifX && ag.regime.pm1)
+      m.croisA2.push("Croisement A2 × A3 : l'écart d'emprise se situe dans l'assiette d'une servitude PM1 (plan de prévention des risques) — si le bâti excédentaire est en zone du 1° du II de L. 562-1 C. env., l'exception 6° de L. 421-9 C. urb. écarte la prescription administrative. Zonage réglementaire du plan à vérifier en priorité.");
     for (const b of ag.batiments.slice(0, 12))
       m.batLignes.push((g.unite ? b.parcelle + ' · ' : '') + Math.round(b.aire) + ' m²' + (b.hauteur ? ' · h. ' + b.hauteur + ' m' : '') +
         (b.usage ? ' · ' + b.usage : '') + (b.apparition ? ' · apparu ' + fdate(String(b.apparition).slice(0,10)) : '') +
@@ -1578,13 +1601,17 @@ function pointsAttention(){
     if (ag.erreursA3.length) pts.push({ n: 'carmin', p: titre, t: 'Emprises indisponibles (' + ag.erreursA3.join(', ') + ') — comparaison du bâti non faite.' });
     if (ag.parcs.length) {
       const A = ag.A, B = ag.B, ec = ag.ecart;
+      // contexte de zone (croisement A2) accolé aux points d'écart
+      const zAN = ag.regime.zones.length && ag.regime.zones.every(z => z.typezone === 'A' || z.typezone === 'N');
+      const ctxA2 = (zAN ? ' Zone ' + ag.regime.zones.map(z => z.libelle).join('/') + ' (agricole/naturelle, constructibilité restreinte).' : '')
+                  + (ag.regime.pm1 ? ' Assiette PPR (PM1) — exception 6° de L. 421-9 possible.' : '');
       if (A < SURFACE_MIN && B >= SURFACE_MIN)
-        pts.push({ n: 'carmin', p: titre, t: 'Bâti visible en photogrammétrie (' + fnum(B) + " m²) sans bâti significatif au plan cadastral — à instruire." });
+        pts.push({ n: 'carmin', p: titre, t: 'Bâti visible en photogrammétrie (' + fnum(B) + " m²) sans bâti significatif au plan cadastral — à instruire." + ctxA2 });
       else if (ec !== null && ec > SEUIL_ECART) {
         if (!ag.autorisations.length && !ag.sansA1.length)
-          pts.push({ n: 'carmin', p: titre, t: "Écart d'emprise de +" + (ec * 100).toFixed(1) + ' % sans aucune autorisation Sitadel — vérification en mairie indispensable.' });
+          pts.push({ n: 'carmin', p: titre, t: "Écart d'emprise de +" + (ec * 100).toFixed(1) + ' % sans aucune autorisation Sitadel — vérification en mairie indispensable.' + ctxA2 });
         else
-          pts.push({ n: 'orange', p: titre, t: "Écart d'emprise de +" + (ec * 100).toFixed(1) + ' % (seuil provisoire 5 %) — à instruire.' });
+          pts.push({ n: 'orange', p: titre, t: "Écart d'emprise de +" + (ec * 100).toFixed(1) + ' % (seuil provisoire 5 %) — à instruire.' + ctxA2 });
       }
       // bâti significatif sans aucune autorisation retrouvée : relevé mairie à obtenir
       if (B >= SURFACE_MIN && !ag.autorisations.length && !ag.sansA1.length
@@ -1868,6 +1895,7 @@ $('expPdf').onclick = async () => {
       bandeauSection('4 · BÂTI RÉEL CONTRE BÂTI DÉCLARÉ — CADASTRE VS BD TOPO');
       encadrePDF(m.constat, m.constatNiveau);
       if (m.croisement) encadrePDF(m.croisement.t, m.croisement.niv === 'erreur' ? 'erreur' : 'ras');
+      for (const cx of m.croisA2) encadrePDF(cx, 'vigilance');
       if (m.batLignes.length) {
         ecrire('Bâtiments BD TOPO ' + (g.unite ? "sur l'unité :" : 'sur la parcelle :'), { taille: 8.5, gras: true, coul: NUIT, avant: 2 });
         m.batLignes.forEach((bl, j) => ecrire('n° ' + (j+1) + ' — ' + bl, { taille: 8, coul: NOIR }));
@@ -2024,6 +2052,8 @@ $('expWord').onclick = async () => {
       }));
       if (m.croisement)
         droite.push(P(T(m.croisement.t, { size: 17, bold: m.croisement.niv === 'erreur', color: m.croisement.niv === 'erreur' ? CARMIN : CANARD }), { spacing: { after: 80 } }));
+      for (const cx of m.croisA2)
+        droite.push(P(T(cx, { size: 17, bold: true, color: ORANGE }), { spacing: { after: 80 } }));
       if (m.batLignes.length) {
         droite.push(P(T('Bâtiments BD TOPO ' + (g.unite ? 'sur l’unité :' : 'sur la parcelle :'), { size: 18, bold: true, color: NUIT }), { spacing: { before: 100 } }));
         m.batLignes.forEach((bl, j) => droite.push(P(T('n° ' + (j+1) + ' — ' + bl, { size: 17 }))));
